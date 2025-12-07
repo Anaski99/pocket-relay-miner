@@ -1,0 +1,19 @@
+# Backend Server Configuration
+
+# HTTP/WebSocket/SSE port
+http_port: 8545
+
+# gRPC port
+grpc_port: 50051
+
+# Prometheus metrics port
+metrics_port: 9095
+
+# Error injection rate (0.0 = disabled, 0.05 = 5% of requests fail)
+error_rate: 0.0
+
+# HTTP error code to inject when error_rate > 0
+error_code: 500
+
+# Delay in milliseconds to simulate latency (0 = no delay)
+delay_ms: 0

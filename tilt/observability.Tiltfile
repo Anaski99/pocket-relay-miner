@@ -1,0 +1,247 @@
+# observability.tilt - Prometheus and Grafana deployment
+
+load("./ports.Tiltfile", "get_port")
+
+def deploy_observability(config):
+    """Deploy Prometheus and Grafana"""
+    if not config["observability"]["enabled"]:
+        print("Observability disabled")
+        return
+
+    print("Deploying observability stack (Prometheus + Grafana)...")
+
+    deploy_prometheus(config)
+    deploy_grafana(config)
+
+def deploy_prometheus(config):
+    """Deploy Prometheus for metrics collection"""
+    prom_config = config["observability"]["prometheus"]
+
+    # Prometheus ConfigMap
+    prometheus_config_yaml = """
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: {}
+      evaluation_interval: {}
+
+    scrape_configs:
+      # Redis metrics (if redis-exporter is deployed)
+      - job_name: 'redis'
+        static_configs:
+          - targets: ['redis:6379']
+
+      # Relayer metrics
+      - job_name: 'relayers'
+        kubernetes_sd_configs:
+          - role: service
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_label_app]
+            regex: relayer
+            action: keep
+          - source_labels: [__meta_kubernetes_service_name]
+            target_label: instance
+
+      # Miner metrics
+      - job_name: 'miners'
+        kubernetes_sd_configs:
+          - role: service
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_label_app]
+            regex: miner
+            action: keep
+          - source_labels: [__meta_kubernetes_service_name]
+            target_label: instance
+
+      # Backend metrics
+      - job_name: 'backend'
+        static_configs:
+          - targets: ['backend:9095']
+""".format(prom_config["scrape_interval"], prom_config["scrape_interval"])
+
+    k8s_yaml(blob(prometheus_config_yaml))
+
+    # Prometheus Deployment
+    prometheus_yaml = """
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  labels:
+    app: prometheus
+spec:
+  selector:
+    app: prometheus
+  ports:
+  - port: 9091
+    targetPort: 9090
+    name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  labels:
+    app: prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      containers:
+      - name: prometheus
+        image: prom/prometheus:latest
+        args:
+          - '--config.file=/etc/prometheus/prometheus.yml'
+          - '--storage.tsdb.path=/prometheus'
+          - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+          - '--web.console.templates=/usr/share/prometheus/consoles'
+        ports:
+        - containerPort: 9090
+          name: http
+        volumeMounts:
+        - name: config
+          mountPath: /etc/prometheus
+        - name: storage
+          mountPath: /prometheus
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "1Gi"
+      volumes:
+      - name: config
+        configMap:
+          name: prometheus-config
+      - name: storage
+        emptyDir: {}
+"""
+
+    k8s_yaml(blob(prometheus_yaml))
+
+    k8s_resource(
+        "prometheus",
+        labels=["observability"],
+        objects=["prometheus-config:configmap"],
+        port_forwards=[format_port_forward(prom_config["port"], 9090)]
+    )
+
+def deploy_grafana(config):
+    """Deploy Grafana for metrics visualization"""
+    grafana_config = config["observability"]["grafana"]
+
+    # Grafana Deployment
+    grafana_yaml = """
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus:9091
+        isDefault: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  labels:
+    app: grafana
+spec:
+  selector:
+    app: grafana
+  ports:
+  - port: 3000
+    targetPort: 3000
+    name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+      - name: grafana
+        image: grafana/grafana:latest
+        ports:
+        - containerPort: 3000
+          name: http
+        env:
+        - name: GF_AUTH_ANONYMOUS_ENABLED
+          value: "true"
+        - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+          value: "Admin"
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          value: "admin"
+        volumeMounts:
+        - name: datasources
+          mountPath: /etc/grafana/provisioning/datasources
+        - name: dashboards-provisioning
+          mountPath: /etc/grafana/provisioning/dashboards
+        - name: dashboards
+          mountPath: /var/lib/grafana/dashboards
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+      volumes:
+      - name: datasources
+        configMap:
+          name: grafana-datasources
+      - name: dashboards-provisioning
+        configMap:
+          name: grafana-dashboards-provisioning
+          optional: true
+      - name: dashboards
+        configMap:
+          name: grafana-dashboards
+          optional: true
+"""
+
+    k8s_yaml(blob(grafana_yaml))
+
+    k8s_resource(
+        "grafana",
+        labels=["observability"],
+        resource_deps=["prometheus"],
+        objects=["grafana-datasources:configmap"],
+        port_forwards=[format_port_forward(grafana_config["port"], 3000)]
+    )
+
+def format_port_forward(local_port, container_port):
+    """Format port forward string"""
+    return "{}:{}".format(local_port, container_port)
+
+def link(url, text):
+    """Create a Tilt UI link"""
+    return url

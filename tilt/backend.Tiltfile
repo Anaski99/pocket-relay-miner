@@ -1,0 +1,110 @@
+# backend.tilt - Demo backend server deployment
+
+load("./ports.Tiltfile", "get_port")
+
+def deploy_backend(config):
+    """Deploy demo backend server"""
+    if not config["backend"]["enabled"]:
+        print("Backend disabled")
+        return
+
+    print("Deploying demo backend server...")
+
+    backend_config = config["backend"]
+
+    # Build backend server Docker image
+    docker_build(
+        "demo-backend",
+        context="tilt/backend-server",
+        dockerfile="tilt/backend-server/Dockerfile",
+    )
+
+    # Backend Deployment
+    backend_yaml = """
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  selector:
+    app: backend
+  ports:
+  - port: 8545
+    targetPort: 8545
+    name: http
+  - port: 50051
+    targetPort: 50051
+    name: grpc
+  - port: 9095
+    targetPort: 9095
+    name: metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: backend
+        image: demo-backend
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8545
+          name: http
+        - containerPort: 50051
+          name: grpc
+        - containerPort: 9095
+          name: metrics
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8545
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8545
+          initialDelaySeconds: 10
+          periodSeconds: 10
+"""
+
+    k8s_yaml(blob(backend_yaml))
+
+    k8s_resource(
+        "backend",
+        labels=["backends"],
+        port_forwards=[
+            format_port_forward(backend_config["port"], 8545),
+            format_port_forward(backend_config["grpc_port"], 50051),
+            format_port_forward(backend_config["metrics_port"], 9095),
+        ]
+    )
+
+def format_port_forward(local_port, container_port):
+    """Format port forward string"""
+    return "{}:{}".format(local_port, container_port)
+
+def link(url, text):
+    """Create a Tilt UI link"""
+    return url

@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package demo;
+
+option go_package = "github.com/pokt-network/pocket-relay-miner/tilt/backend-server/pb";
+
+// DemoService provides simple gRPC endpoints for testing relay-miner.
+service DemoService {
+  // GetBlockHeight returns the current mock block height.
+  rpc GetBlockHeight(Empty) returns (BlockHeightResponse);
+
+  // GetBlock returns a mock block by number.
+  rpc GetBlock(BlockRequest) returns (BlockResponse);
+
+  // StreamBlocks streams mock blocks continuously.
+  rpc StreamBlocks(StreamRequest) returns (stream BlockResponse);
+
+  // HealthCheck returns service health status.
+  rpc HealthCheck(Empty) returns (HealthResponse);
+}
+
+message Empty {}
+
+message BlockHeightResponse {
+  uint64 height = 1;
+}
+
+message BlockRequest {
+  uint64 number = 1;
+}
+
+message BlockResponse {
+  uint64 number = 1;
+  string hash = 2;
+  int64 timestamp = 3;
+  repeated string transactions = 4;
+}
+
+message StreamRequest {
+  uint64 start_height = 1;
+}
+
+message HealthResponse {
+  bool healthy = 1;
+  string status = 2;
+}

@@ -1,0 +1,24 @@
+# Git
+.git
+.gitignore
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Build artifacts
+bin/
+pocket-relay-miner
+coverage.out
+coverage.html
+
+# Documentation
+README.md
+CLAUDE.md
+*.md
+
+# CI/CD
+.github/

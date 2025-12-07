@@ -1,0 +1,61 @@
+accounts:
+  - name: faucet
+    address: pokt1awtlw5sjmw2f5lgj8ekdkaqezphgz88rdk93sk
+    private_key: 173f4a0aac81d4d4f5f27c6753130e6279d8b6a6a24a49f045217b0aa6e84b4b
+    mnemonic: "baby advance work soap slow exclude blur humble lucky rough teach wide chuckle captain rack laundry butter main very cannon donate armor dress follow"
+  - name: pnf
+    address: pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw
+    private_key: f4086e33e2450fc9f102abfe3f2df511ce221a0d65414154f728f29930ccad30
+    mnemonic: "crumble shrimp south strategy speed kick green topic stool seminar track stand rhythm almost bubble pet knock steel pull flag weekend country major blade"
+  - name: validator1
+    address: pokt18kk3aqe2pjz7x7993qp2pjt95ghurra9682tyn
+    private_key: cc3b85b08ca33957246edbcb8b63fe8b24b1dc12a8fcd57cdd26d88eab74cd3d
+    mnemonic: "creek path rule retire evolve vehicle bargain champion roof whisper prize endorse unknown anchor fashion energy club sauce elder parent cotton old affair visa"
+  - name: app1
+    address: pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4
+    private_key: 2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a
+    mnemonic: "mention spy involve verb exercise fiction catalog order agent envelope mystery text defy sing royal fringe return face alpha knife wonder vocal virus drum"
+  - name: app2
+    address: pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4
+    private_key: 2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a
+    mnemonic: "material little labor strong search device trick amateur action crouch invite glide provide elite mango now paper sense found hamster neglect work install bulk"
+  - name: app3
+    address: pokt1lqyu4v88vp8tzc86eaqr4lq8rwhssyn6rfwzex
+    private_key: 7cbbaa043b9b63baa7d6bb087483b0a6a9f82596c19dce4c5028eb43e5b63674
+    mnemonic: "involve clean slab term real human green immune valid swing protect talk silent unique cart few ice era right thunder again drop among bounce"
+  - name: app4
+    address: pokt1pn64d94e6u5g8cllsnhgrl6t96ysnjw59j5gst
+    private_key: 84e4f2257f24d9e1517d414b834bbbfa317e0d53fef21c1528a07a5fa8c70d57
+    mnemonic: "blade light diagram grocery quit orchard patient wonder usual category later want offer increase blush this business protect village top cricket laundry holiday measure"
+  - name: app5
+    address: pokt1ad28jdap2zfanjd7hpkh984yveney6k9a42man
+    private_key: c5dc11808ae05850f4ca2973c2d89cb243d2c83f6b352fe5467a29536258594d
+    mnemonic: "worry pupil rival such jump pitch flame prosper tattoo eternal round receive cube crowd remove afraid garment brand toy nut guitar toy sausage fragile"
+  - name: supplier1
+    address: pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj
+    private_key: cd41a98ac7ac3b190c345b88e2885422d7bb553c59bca03c6e2618d49f8b1c06
+    mnemonic: "cool industry busy tumble funny relax error state height like board wing goat emerge visual idle never unveil announce hill primary okay spatial frog"
+  - name: supplier2
+    address: pokt1re27pw4llwnatx4sq7rlggqzcm6j3f39epq2wa
+    private_key: 7b2d353bf74a0aade09bf21928a9e195b54fd1309d19b11e63e16f92efdb610c
+    mnemonic: "peanut hen enroll meat legal have error input bulk later correct denial onion fossil wing excuse elephant object apology switch claim rare decide surface"
+  - name: supplier3
+    address: pokt1j6dun0x8eyq5mmsmq83zs3c2utt85q8478c89u
+    private_key: 3f132ad18b97a7adcbbc45d1741997406c5a2625829f9bdac51736f748857710
+    mnemonic: "client city senior tenant source soda spread buffalo shaft amused bar carbon keen off feel coral easily announce metal orphan sustain maple expand loop"
+  - name: gateway1
+    address: pokt15vzxjqklzjtlz7lahe8z2dfe9nm5vxwwmscne4
+    private_key: cf09805c952fa999e9a63a9f434147b0a5abfd10f268879694c6b5a70e1ae177
+    mnemonic: "salt iron goat also absorb depend involve agent apology between lift shy door left bulb arrange industry father jelly olive rifle return predict into"
+  - name: gateway2
+    address: pokt15w3fhfyc0lttv7r585e2ncpf6t2kl9uh8rsnyz
+    private_key: 177ba43cec962ea407f71da9c3994ba685708e82d5d7a6d7da3268e74119bf88
+    mnemonic: "suffer wet jelly furnace cousin flip layer render finish frequent pledge feature economy wink like water disease final erase goat include apple state furnace"
+  - name: gateway3
+    address: pokt1zhmkkd0rh788mc9prfq0m2h88t9ge0j83gnxya
+    private_key: f73b6f7f0b9c99603c7eeddbf1c419c6f6bbc241f3798e3e4c8da9769ca81c26
+    mnemonic: "elder spatial erosion soap athlete tide subject recipe also awkward head pattern cart version beach usual oxygen confirm erupt diamond maze smooth census garment"
+  - name: source_owner_develop
+    address: pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5
+    private_key: 8f4fc67c3bcdf7fcc1c14442a7529f42eb10b45637494acac3acbf3a8dfa282b
+    mnemonic: "burden effort glue note honey erupt fiscal vote gold addict toy flag spare wrap chest table bomb sort arena phone sadness sustain urge wink"
