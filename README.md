@@ -1,13 +1,26 @@
 # Pocket RelayMiner (High Availability)
 
-High-Availability RelayMiner implementation for Pocket Network - a production-grade, horizontally scalable relay mining service.
+High-Availability RelayMiner implementation for Pocket Network - a production-grade, horizontally scalable relay mining service with full multi-transport support.
 
 ## Overview
 
 The HA RelayMiner is a distributed relay mining system that enables horizontal scaling and automatic failover through Redis-based shared state. It separates concerns into two components:
 
-- **Relayer**: Stateless HTTP/WebSocket proxy that validates and forwards relay requests (scales horizontally)
+- **Relayer**: Stateless multi-transport proxy (JSON-RPC, WebSocket, gRPC, Streaming) that validates and forwards relay requests (scales horizontally)
 - **Miner**: Stateful claim/proof submission service with leader election (active-standby failover)
+
+### Supported Transport Protocols
+
+✅ **JSON-RPC (HTTP)** - Traditional HTTP POST with JSON-RPC payload
+✅ **WebSocket** - Persistent bidirectional connections for real-time applications
+✅ **gRPC** - High-performance binary protocol with streaming support
+✅ **REST/Streaming** - Server-Sent Events (SSE) for streaming responses
+
+All transport modes support:
+- Ring signature validation for application authentication
+- Supplier signature verification on responses
+- Relay metering and rate limiting
+- Session-based routing to backends
 
 ## Architecture
 
@@ -143,6 +156,62 @@ Only one miner instance will be active (leader) at any time. The leader:
 - Builds SMST trees and submits claims/proofs
 
 Standby instances automatically take over if the leader fails.
+
+### Relay Testing Tool
+
+Test all supported transport protocols with signature verification:
+
+```bash
+# Test JSON-RPC (HTTP) relay
+pocket-relay-miner relay jsonrpc \
+  --app-priv-key <hex> \
+  --service <serviceID> \
+  --node <grpc_endpoint> \
+  --chain-id <chainID> \
+  --relayer-url <relayer_url> \
+  --supplier <supplier_address>
+
+# Test WebSocket relay
+pocket-relay-miner relay websocket \
+  --app-priv-key <hex> \
+  --service <serviceID> \
+  --node <grpc_endpoint> \
+  --chain-id <chainID> \
+  --relayer-url <relayer_url> \
+  --supplier <supplier_address>
+
+# Test gRPC relay
+pocket-relay-miner relay grpc \
+  --app-priv-key <hex> \
+  --service <serviceID> \
+  --node <grpc_endpoint> \
+  --chain-id <chainID> \
+  --relayer-url <relayer_url> \
+  --supplier <supplier_address>
+
+# Test streaming relay (SSE)
+pocket-relay-miner relay stream \
+  --app-priv-key <hex> \
+  --service <serviceID> \
+  --node <grpc_endpoint> \
+  --chain-id <chainID> \
+  --relayer-url <relayer_url> \
+  --supplier <supplier_address>
+
+# Load testing mode (concurrent requests)
+pocket-relay-miner relay jsonrpc \
+  --load-test \
+  --count 1000 \
+  --concurrency 50 \
+  <...other flags>
+```
+
+**Features:**
+- Signature verification for all relay responses
+- Detailed timing breakdowns (build, network, verify)
+- Load testing with configurable concurrency
+- Custom JSON-RPC payload support
+- Session-based relay construction
 
 ### Redis Debug Tools
 

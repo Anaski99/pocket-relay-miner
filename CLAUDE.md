@@ -14,19 +14,21 @@ This file provides strict guidance to Claude Code when working with this reposit
 
 ## Project Overview
 
-**Pocket RelayMiner (HA)** is a production-grade, horizontally scalable relay mining service for Pocket Network.
+**Pocket RelayMiner (HA)** is a production-grade, horizontally scalable relay mining service for Pocket Network with full multi-transport support.
 
 - **Language**: Go 1.24.3
 - **Architecture**: Distributed microservices with Redis-backed state
+- **Transports**: JSON-RPC (HTTP), WebSocket, gRPC, REST/Streaming (SSE)
 - **Performance Target**: 1000+ RPS per relayer replica
 - **Availability**: 99.9% uptime with automatic failover
 
 ### Critical Components
 
-1. **Relayer** (`relayer/`): Stateless HTTP/WebSocket proxy
+1. **Relayer** (`relayer/`): Stateless multi-transport proxy (JSON-RPC, WebSocket, gRPC, Streaming)
    - Validates relay requests (ring signatures, sessions)
    - Signs responses with supplier keys
    - Publishes to Redis Streams
+   - Routes to backends based on Rpc-Type header (1=gRPC, 2=WebSocket, 3=JSON_RPC, 4=REST, 5=CometBFT)
    - **Performance**: Sub-millisecond validation, <2ms response time
 
 2. **Miner** (`miner/`): Stateful claim/proof submission with leader election
@@ -430,3 +432,4 @@ See `go.mod` for complete dependency list.
 - ✅ Code that must fail safely
 
 **Your job is to maintain these standards rigorously.**
+- Always read CLAUDE.md to understand how you should behave on this project

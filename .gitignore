@@ -1,2 +1,3 @@
 bin
 .tilt-tmp/
+tilt_config.yaml
