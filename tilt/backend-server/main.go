@@ -23,12 +23,12 @@ import (
 
 // Config holds backend server configuration.
 type Config struct {
-	HTTPPort    int           `yaml:"http_port"`
-	GRPCPort    int           `yaml:"grpc_port"`
-	MetricsPort int           `yaml:"metrics_port"`
-	ErrorRate   float64       `yaml:"error_rate"`   // 0.0-1.0
-	ErrorCode   int           `yaml:"error_code"`   // HTTP error code to inject
-	DelayMs     int           `yaml:"delay_ms"`     // Delay in milliseconds
+	HTTPPort    int     `yaml:"http_port"`
+	GRPCPort    int     `yaml:"grpc_port"`
+	MetricsPort int     `yaml:"metrics_port"`
+	ErrorRate   float64 `yaml:"error_rate"` // 0.0-1.0
+	ErrorCode   int     `yaml:"error_code"` // HTTP error code to inject
+	DelayMs     int     `yaml:"delay_ms"`   // Delay in milliseconds
 }
 
 var (
