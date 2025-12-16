@@ -68,10 +68,10 @@ type SessionQueryClient interface {
 // LifecycleCallback implements SessionLifecycleCallback to handle claim and proof submission.
 // It coordinates SMST operations with transaction submission and uses proper timing spread.
 type LifecycleCallback struct {
-	logger         logging.Logger
-	config         LifecycleCallbackConfig
-	supplierClient pocktclient.SupplierClient
-	sharedClient   pocktclient.SharedQueryClient
+	logger             logging.Logger
+	config             LifecycleCallbackConfig
+	supplierClient     pocktclient.SupplierClient
+	sharedClient       pocktclient.SharedQueryClient
 	blockClient        pocktclient.BlockClient
 	sessionClient      SessionQueryClient
 	smstManager        SMSTManager

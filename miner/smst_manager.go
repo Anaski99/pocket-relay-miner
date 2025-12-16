@@ -232,9 +232,7 @@ func (m *RedisSMSTManager) DeleteTree(ctx context.Context, sessionID string) err
 	defer m.treesMu.Unlock()
 
 	// Remove from memory
-	if _, exists := m.trees[sessionID]; exists {
-		delete(m.trees, sessionID)
-	}
+	delete(m.trees, sessionID)
 
 	// Remove from Redis
 	hashKey := fmt.Sprintf("ha:smst:%s:nodes", sessionID)
