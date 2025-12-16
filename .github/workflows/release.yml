@@ -3,9 +3,10 @@ name: Release
 on:
   push:
     branches:
-      - main
+      - dev      # Development builds → dev tag
+      - main     # Release candidates → rc tag
     tags:
-      - 'v*'
+      - 'v*'     # Production releases → version + latest tags
 
 permissions:
   contents: write
@@ -37,15 +38,28 @@ jobs:
           echo "commit=${COMMIT}" >> $GITHUB_OUTPUT
           echo "build_date=${BUILD_DATE}" >> $GITHUB_OUTPUT
 
-          # Determine image tags based on ref
-          TAGS="ghcr.io/pokt-network/pocket-relay-miner:${VERSION}"
-
-          if [[ $GITHUB_REF == refs/tags/* ]]; then
-            # Tag push: add 'latest' tag
-            TAGS="${TAGS},ghcr.io/pokt-network/pocket-relay-miner:latest"
+          # Determine image tags based on ref type and branch
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
+            # Git tag (e.g., v1.0.0) → version tag + latest
+            # Example: v1.0.0 → tags: 1.0.0, latest
+            VERSION_TAG=$(echo $GITHUB_REF | sed 's|refs/tags/v||')
+            TAGS="ghcr.io/pokt-network/pocket-relay-miner:${VERSION_TAG},ghcr.io/pokt-network/pocket-relay-miner:latest"
+            echo "🚀 Production Release: ${VERSION_TAG}"
+          elif [[ $GITHUB_REF == refs/heads/main ]]; then
+            # Main branch → version + rc tag
+            # Example: main → tags: bd0f982, rc
+            TAGS="ghcr.io/pokt-network/pocket-relay-miner:${VERSION},ghcr.io/pokt-network/pocket-relay-miner:rc"
+            echo "📦 Release Candidate: ${VERSION}"
+          elif [[ $GITHUB_REF == refs/heads/dev ]]; then
+            # Dev branch → dev tag only (always latest dev)
+            # Example: dev → tag: dev
+            TAGS="ghcr.io/pokt-network/pocket-relay-miner:dev"
+            echo "🔧 Development Build: ${VERSION}"
           else
-            # Main branch push: add 'rc' tag
-            TAGS="${TAGS},ghcr.io/pokt-network/pocket-relay-miner:rc"
+            # Fallback for other branches
+            BRANCH_NAME=$(echo $GITHUB_REF | sed 's|refs/heads/||')
+            TAGS="ghcr.io/pokt-network/pocket-relay-miner:${BRANCH_NAME}-${VERSION}"
+            echo "🌿 Branch Build: ${BRANCH_NAME}-${VERSION}"
           fi
 
           echo "tags=${TAGS}" >> $GITHUB_OUTPUT
