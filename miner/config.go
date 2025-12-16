@@ -29,6 +29,9 @@ type Config struct {
 	// Metrics configuration.
 	Metrics MetricsConfig `yaml:"metrics"`
 
+	// PProf configuration.
+	PProf PProf `yaml:"pprof"`
+
 	// Logging configuration.
 	Logging logging.Config `yaml:"logging"`
 
@@ -51,6 +54,11 @@ type Config struct {
 	// SessionTTL is the TTL for session data.
 	// Default: 24h
 	SessionTTL time.Duration `yaml:"session_ttl"`
+
+	// CacheTTL is the TTL for Redis cached data (params, app stakes, service data, SMST trees).
+	// This is a backup safety net - manual cleanup is primary, TTL prevents leaks if cleanup fails.
+	// Default: 2h (covers ~15 session lifecycles at 30s blocks)
+	CacheTTL time.Duration `yaml:"cache_ttl"`
 
 	// KnownApplications is a list of application addresses to pre-discover at startup.
 	// These apps will be fetched from the network and added to the cache during initialization.
@@ -261,14 +269,6 @@ type MetricsConfig struct {
 	// Addr is the address to expose metrics on.
 	// Default: ":9092"
 	Addr string `yaml:"addr"`
-
-	// PprofEnabled enables pprof profiling server.
-	// Default: false (disabled for production safety)
-	PprofEnabled bool `yaml:"pprof_enabled,omitempty"`
-
-	// PprofAddr is the address for pprof server.
-	// Default: "localhost:6060" (localhost only for security)
-	PprofAddr string `yaml:"pprof_addr,omitempty"`
 }
 
 // PProf contains pprof configuration.
@@ -516,6 +516,14 @@ func (c *Config) GetStreamDiscoveryInterval() time.Duration {
 	return 10 * time.Second // Default: 10 seconds
 }
 
+// GetCacheTTL returns the cache TTL for Redis cached data.
+func (c *Config) GetCacheTTL() time.Duration {
+	if c.CacheTTL > 0 {
+		return c.CacheTTL
+	}
+	return 2 * time.Hour // Default: 2h (covers ~15 session lifecycles at 30s blocks)
+}
+
 // DefaultConfig returns a config with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
@@ -541,6 +549,7 @@ func DefaultConfig() *Config {
 		AckBatchSize:           50,
 		HotReloadEnabled:       true,
 		SessionTTL:             24 * time.Hour,
+		CacheTTL:               2 * time.Hour, // Covers ~15 session lifecycles at 30s blocks
 		BalanceMonitor: BalanceMonitorConfigYAML{
 			Enabled:                     true,    // Enable by default
 			BalanceThresholdUpokt:       1000000, // 1 POKT = 1,000,000 upokt

@@ -29,6 +29,10 @@ type ParamsRefresherConfig struct {
 
 	// RedisKeyPrefix is the prefix for Redis keys.
 	RedisKeyPrefix string
+
+	// CacheTTL is the TTL for cached params data in Redis.
+	// This is a backup safety net - data should be manually cleaned up when no longer needed.
+	CacheTTL time.Duration
 }
 
 // DefaultParamsRefresherConfig returns sensible defaults.
@@ -36,6 +40,7 @@ func DefaultParamsRefresherConfig() ParamsRefresherConfig {
 	return ParamsRefresherConfig{
 		RefreshInterval: defaultParamsRefreshInterval,
 		RedisKeyPrefix:  "ha",
+		CacheTTL:        2 * time.Hour, // Default: 2h
 	}
 }
 
@@ -235,7 +240,7 @@ func (r *ParamsRefresher) refreshSharedParams(ctx context.Context) error {
 	}
 
 	key := fmt.Sprintf("%s:params:shared", r.config.RedisKeyPrefix)
-	if err := r.redisClient.Set(ctx, key, mustMarshalJSON(cached), 10*time.Minute).Err(); err != nil {
+	if err := r.redisClient.Set(ctx, key, mustMarshalJSON(cached), r.config.CacheTTL).Err(); err != nil {
 		return err
 	}
 
@@ -263,7 +268,7 @@ func (r *ParamsRefresher) refreshSessionParams(ctx context.Context) error {
 	}
 
 	key := fmt.Sprintf("%s:params:session", r.config.RedisKeyPrefix)
-	if err := r.redisClient.Set(ctx, key, mustMarshalJSON(cached), 10*time.Minute).Err(); err != nil {
+	if err := r.redisClient.Set(ctx, key, mustMarshalJSON(cached), r.config.CacheTTL).Err(); err != nil {
 		return err
 	}
 
@@ -310,7 +315,7 @@ func (r *ParamsRefresher) refreshAppStake(ctx context.Context, appAddress string
 	}
 
 	key := fmt.Sprintf("%s:app_stake:%s", r.config.RedisKeyPrefix, appAddress)
-	if err := r.redisClient.Set(ctx, key, mustMarshalJSON(cached), 10*time.Minute).Err(); err != nil {
+	if err := r.redisClient.Set(ctx, key, mustMarshalJSON(cached), r.config.CacheTTL).Err(); err != nil {
 		return err
 	}
 
@@ -359,7 +364,7 @@ func (r *ParamsRefresher) refreshServiceComputeUnitsForService(ctx context.Conte
 	}
 
 	key := fmt.Sprintf("%s:service:%s:compute_units", r.config.RedisKeyPrefix, serviceID)
-	if err := r.redisClient.Set(ctx, key, mustMarshalJSON(cached), 10*time.Minute).Err(); err != nil {
+	if err := r.redisClient.Set(ctx, key, mustMarshalJSON(cached), r.config.CacheTTL).Err(); err != nil {
 		return err
 	}
 
