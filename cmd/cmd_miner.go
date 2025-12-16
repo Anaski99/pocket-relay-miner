@@ -122,14 +122,8 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	// Start an observability server (metrics and pprof)
-	if config.Metrics.Enabled {
-		// Default pprof addr to localhost:6060 for security if not specified
-		pprofAddr := config.Metrics.PprofAddr
-		if pprofAddr == "" {
-			pprofAddr = "localhost:6060"
-		}
-
+	// Start an observability server (metrics and/or pprof)
+	if config.Metrics.Enabled || config.PProf.Enabled {
 		// Combine MinerRegistry and SharedRegistry so cache metrics are exposed
 		combinedRegistry := prometheus.Gatherers{
 			observability.MinerRegistry,
@@ -139,8 +133,8 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		obsServer := observability.NewServer(logger, observability.ServerConfig{
 			MetricsEnabled: config.Metrics.Enabled,
 			MetricsAddr:    config.Metrics.Addr,
-			PprofEnabled:   config.Metrics.PprofEnabled,
-			PprofAddr:      pprofAddr,
+			PprofEnabled:   config.PProf.Enabled,
+			PprofAddr:      config.PProf.Addr,
 			Registry:       combinedRegistry,
 		})
 		if err := obsServer.Start(ctx); err != nil {
@@ -148,18 +142,6 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		}
 		defer func() { _ = obsServer.Stop() }()
 		logger.Info().Str("addr", config.Metrics.Addr).Msg("observability server started")
-
-		// Start runtime metrics collector
-		runtimeMetrics := observability.NewRuntimeMetricsCollector(
-			logger,
-			observability.DefaultRuntimeMetricsCollectorConfig(),
-			observability.MinerFactory,
-		)
-		if err := runtimeMetrics.Start(ctx); err != nil {
-			return fmt.Errorf("failed to start runtime metrics collector: %w", err)
-		}
-		defer runtimeMetrics.Stop()
-		logger.Info().Msg("runtime metrics collector started")
 	}
 
 	// Parse Redis URL
@@ -206,12 +188,12 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 			HotReloadEnabled: config.HotReloadEnabled,
 		},
 	)
+	defer func() { _ = keyManager.Close() }()
 
 	// Start key manager
 	if err := keyManager.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start key manager: %w", err)
 	}
-	defer func() { _ = keyManager.Close() }()
 
 	// Check if any keys were loaded
 	suppliers := keyManager.ListSuppliers()
@@ -584,6 +566,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 			ConsumerGroup:       config.Redis.ConsumerGroup,
 			ConsumerName:        config.Redis.ConsumerName,
 			SessionTTL:          config.SessionTTL,
+			CacheTTL:            config.GetCacheTTL(),
 			BatchSize:           config.BatchSize,    // XREADGROUP batch size
 			AckBatchSize:        config.AckBatchSize, // ACK batch size
 			SupplierCache:       supplierCache,

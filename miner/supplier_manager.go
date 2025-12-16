@@ -82,6 +82,9 @@ type SupplierManagerConfig struct {
 	// Session configuration
 	SessionTTL time.Duration
 
+	// CacheTTL is the TTL for cached data (SMST trees, params, etc.)
+	CacheTTL time.Duration
+
 	// Batch configuration
 	BatchSize    int64 // Number of messages to fetch per XREADGROUP
 	AckBatchSize int64 // Number of messages to ACK in a batch
@@ -397,7 +400,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		m.config.RedisClient,
 		RedisSMSTManagerConfig{
 			SupplierAddress: operatorAddr,
-			CacheTTL:        m.config.SessionTTL, // TODO: Rename SessionTTL → CacheTTL
+			CacheTTL:        m.config.CacheTTL,
 		},
 	)
 
