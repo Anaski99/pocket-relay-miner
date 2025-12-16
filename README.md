@@ -760,3 +760,38 @@ Latency Percentiles (ms):
 - **Local (Docker-in-Docker)**: Use concurrency 3-5 (avoids environment limits)
 - **Production Load Test**: Use concurrency 10-50 (matches real traffic patterns)
 - **Stress Test**: Use concurrency 100+ (identifies breaking points)
+
+## Contributing
+
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for:
+
+- Development workflow (dev → main → release)
+- Commit message format (Conventional Commits)
+- Code standards and testing requirements
+- Pull request process
+
+**Quick Start:**
+```bash
+# Clone and setup
+git clone https://github.com/pokt-network/pocket-relay-miner.git
+cd pocket-relay-miner
+git checkout dev
+
+# Make changes
+git checkout -b feature/your-feature
+
+# Test
+make fmt lint test build
+
+# Commit with conventional format
+git commit -m "feat(scope): your feature description"
+
+# Push and create PR to 'dev' branch
+git push origin feature/your-feature
+```
+
+For detailed guidelines, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

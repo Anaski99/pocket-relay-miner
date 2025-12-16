@@ -1,0 +1,58 @@
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+    authors:
+      - dependabot
+  categories:
+    - title: 🚀 Features
+      labels:
+        - feature
+        - enhancement
+      # Auto-categorize based on conventional commit prefixes
+      rules:
+        - pattern: '^feat(\(.+\))?:'
+
+    - title: 🐛 Bug Fixes
+      labels:
+        - bug
+        - bugfix
+      rules:
+        - pattern: '^fix(\(.+\))?:'
+
+    - title: ⚡ Performance Improvements
+      labels:
+        - performance
+      rules:
+        - pattern: '^perf(\(.+\))?:'
+
+    - title: 📚 Documentation
+      labels:
+        - documentation
+      rules:
+        - pattern: '^docs(\(.+\))?:'
+
+    - title: 🔧 Configuration & Build
+      labels:
+        - build
+        - ci
+      rules:
+        - pattern: '^build(\(.+\))?:'
+        - pattern: '^ci(\(.+\))?:'
+        - pattern: '^chore(\(.+\))?:'
+
+    - title: ♻️ Refactoring
+      labels:
+        - refactor
+      rules:
+        - pattern: '^refactor(\(.+\))?:'
+
+    - title: ✅ Tests
+      labels:
+        - test
+      rules:
+        - pattern: '^test(\(.+\))?:'
+
+    - title: 🔀 Other Changes
+      labels:
+        - "*"

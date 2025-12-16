@@ -181,10 +181,82 @@ jobs:
     needs: [metadata, create-manifest]
     if: startsWith(github.ref, 'refs/tags/')
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get the previous tag for changelog range
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          CURRENT_TAG="${GITHUB_REF#refs/tags/}"
+
+          if [ -z "$PREVIOUS_TAG" ]; then
+            echo "First release - generating full changelog"
+            RANGE=""
+          else
+            echo "Generating changelog from ${PREVIOUS_TAG} to ${CURRENT_TAG}"
+            RANGE="${PREVIOUS_TAG}..${CURRENT_TAG}"
+          fi
+
+          # Generate changelog content
+          VERSION_NUMBER="${CURRENT_TAG#v}"
+          cat > RELEASE_NOTES.md << EOF
+          ## Docker Images
+
+          **Multi-arch images available:**
+          \`\`\`bash
+          docker pull ghcr.io/pokt-network/pocket-relay-miner:${VERSION_NUMBER}
+          docker pull ghcr.io/pokt-network/pocket-relay-miner:latest
+          \`\`\`
+
+          **Architecture-specific:**
+          - AMD64: \`ghcr.io/pokt-network/pocket-relay-miner:${VERSION_NUMBER}-amd64\`
+          - ARM64: \`ghcr.io/pokt-network/pocket-relay-miner:${VERSION_NUMBER}-arm64\`
+
+          ## What's Changed
+
+          EOF
+
+          # Group commits by conventional commit type
+          echo "### 🚀 Features" >> RELEASE_NOTES.md
+          git log $RANGE --pretty=format:"- %s ([%h](https://github.com/${{ github.repository }}/commit/%H))" --grep="^feat" >> RELEASE_NOTES.md || echo "_No new features_" >> RELEASE_NOTES.md
+          echo -e "\n" >> RELEASE_NOTES.md
+
+          echo "### 🐛 Bug Fixes" >> RELEASE_NOTES.md
+          git log $RANGE --pretty=format:"- %s ([%h](https://github.com/${{ github.repository }}/commit/%H))" --grep="^fix" >> RELEASE_NOTES.md || echo "_No bug fixes_" >> RELEASE_NOTES.md
+          echo -e "\n" >> RELEASE_NOTES.md
+
+          echo "### ⚡ Performance Improvements" >> RELEASE_NOTES.md
+          git log $RANGE --pretty=format:"- %s ([%h](https://github.com/${{ github.repository }}/commit/%H))" --grep="^perf" >> RELEASE_NOTES.md || echo "_No performance improvements_" >> RELEASE_NOTES.md
+          echo -e "\n" >> RELEASE_NOTES.md
+
+          echo "### 🔧 Configuration & Build" >> RELEASE_NOTES.md
+          git log $RANGE --pretty=format:"- %s ([%h](https://github.com/${{ github.repository }}/commit/%H))" --grep="^build\|^ci\|^chore" >> RELEASE_NOTES.md || echo "_No configuration changes_" >> RELEASE_NOTES.md
+          echo -e "\n" >> RELEASE_NOTES.md
+
+          echo "### 📚 Documentation" >> RELEASE_NOTES.md
+          git log $RANGE --pretty=format:"- %s ([%h](https://github.com/${{ github.repository }}/commit/%H))" --grep="^docs" >> RELEASE_NOTES.md || echo "_No documentation changes_" >> RELEASE_NOTES.md
+          echo -e "\n" >> RELEASE_NOTES.md
+
+          # Add version info footer
+          cat >> RELEASE_NOTES.md << EOF
+          ---
+
+          **Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREVIOUS_TAG}...${CURRENT_TAG}
+
+          **Build Info:**
+          - Version: ${CURRENT_TAG}
+          - Commit: ${{ needs.metadata.outputs.commit }}
+          - Build Date: ${{ needs.metadata.outputs.build_date }}
+          EOF
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
           draft: false
           prerelease: false
         env:

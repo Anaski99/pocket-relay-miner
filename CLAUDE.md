@@ -2,6 +2,18 @@
 
 This file provides strict guidance to Claude Code when working with this repository.
 
+## Contributing Guidelines
+
+**IMPORTANT**: All contributors (human and AI) must follow [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Key requirements:
+- **Conventional Commits**: Use `feat:`, `fix:`, `perf:`, etc. for automated changelogs
+- **Development Workflow**: dev → main → vX.Y.Z release pipeline
+- **Code Standards**: See CONTRIBUTING.md for mandatory requirements
+- **Testing**: All tests must pass before committing (`make fmt lint test`)
+
+This file (CLAUDE.md) provides AI-specific guidance. For general contribution rules, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Core Principles
 
 **YOU ARE NOT A FRIEND. YOU ARE A PROFESSIONAL SOFTWARE ENGINEER.**
