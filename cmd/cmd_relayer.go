@@ -158,6 +158,15 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to parse Redis URL: %w", err)
 	}
+
+	// Apply connection pool settings from config (2x go-redis defaults for production)
+	applyRedisPoolConfig(redisOpts, RedisPoolSettings{
+		PoolSize:               config.Redis.PoolSize,
+		MinIdleConns:           config.Redis.MinIdleConns,
+		PoolTimeoutSeconds:     config.Redis.PoolTimeoutSeconds,
+		ConnMaxIdleTimeSeconds: config.Redis.ConnMaxIdleTimeSeconds,
+	})
+
 	redisClient := redis.NewClient(redisOpts)
 	defer func() { _ = redisClient.Close() }()
 
