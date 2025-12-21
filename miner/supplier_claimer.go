@@ -240,12 +240,20 @@ func (c *SupplierClaimer) TryClaim(ctx context.Context, supplier string) bool {
 		// Already claimed - check if it's by us (renewal case) or another instance
 		owner, err := c.redisClient.Get(ctx, claimKey).Result()
 		if err == nil && owner == c.instanceID {
-			// We already own it, just renew
-			if err := c.redisClient.Expire(ctx, claimKey, c.config.ClaimTTL).Err(); err != nil {
+			// We already own it, just renew - check result to ensure it worked
+			renewed, expireErr := c.redisClient.Expire(ctx, claimKey, c.config.ClaimTTL).Result()
+			if expireErr != nil {
 				c.logger.Warn().
-					Err(err).
+					Err(expireErr).
 					Str("supplier", supplier).
 					Msg("failed to renew existing claim")
+				return false
+			}
+			if !renewed {
+				c.logger.Warn().
+					Str("supplier", supplier).
+					Msg("claim key disappeared during renewal in TryClaim")
+				return false
 			}
 			return true
 		}
@@ -575,9 +583,22 @@ func (c *SupplierClaimer) renewAllClaims() {
 			continue
 		}
 
-		// Renew the lease
-		if err := c.redisClient.Expire(c.ctx, claimKey, c.config.ClaimTTL).Err(); err != nil {
+		// Renew the lease - check BOTH error AND result
+		// Expire returns (bool, error) - bool is false if key doesn't exist
+		renewed, err := c.redisClient.Expire(c.ctx, claimKey, c.config.ClaimTTL).Result()
+		if err != nil {
 			c.logger.Warn().Err(err).Str("supplier", supplier).Msg("failed to renew claim")
+		} else if !renewed {
+			// Key didn't exist when we tried to renew - it expired between GET and EXPIRE
+			c.logger.Warn().
+				Str("supplier", supplier).
+				Str("claim_key", claimKey).
+				Msg("claim key disappeared during renewal (race condition)")
+			c.claimedMu.Lock()
+			delete(c.claimed, supplier)
+			c.claimedMu.Unlock()
+			// Try to reclaim
+			c.TryClaim(c.ctx, supplier)
 		} else {
 			c.logger.Debug().
 				Str("supplier", supplier).

@@ -82,7 +82,7 @@ services:
     validation_mode: eager
     timeout_profile: fast
     max_body_size_bytes: 10485760  # 10MB
-    default_backend: nginx  # Use nginx for load testing (switch to jsonrpc for feature testing)
+    default_backend: jsonrpc  # Use jsonrpc for proper protocol labeling (nginx backend still available)
     backends:
       # High-throughput nginx backend - static JSON-RPC response
       # Returns: {"jsonrpc":"2.0","id":1,"result":"0x1"}

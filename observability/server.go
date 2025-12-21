@@ -117,8 +117,9 @@ func (s *Server) startMetricsServer(ctx context.Context) error {
 		}
 	}()
 
-	// Only start runtime metrics collector when using default registry (production mode).
-	// Custom registry indicates test mode - skip to avoid duplicate metric registration.
+	// Start runtime metrics collector using MinerFactory (metrics go to MinerRegistry).
+	// Only start when using default registry - skip for custom registries (tests) to avoid
+	// duplicate registration errors since MinerFactory uses the global MinerRegistry.
 	if s.config.Registry == nil {
 		s.rm = NewRuntimeMetricsCollector(
 			s.logger,

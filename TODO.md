@@ -1,9 +1,9 @@
-- [] Test with PATH
-- [] Health checks (live vs. ready)
-- [] Backend Health checks (like path to answer fast error)
+- [X] Test with PATH
+- [X] CI - fmt, lint, build, docker image
+- [X] Docker Compose example (community contribution needed here!)
 - [] Config review
 - [] Code Review with the team and operators
-- [] CI - fmt, lint, build, docker image
+- [] Backend Health checks (like path to answer fast error)
+- [] Health checks (live vs. ready)
 - [] Redis Cluster in Tilt
 - [] E2E Tests
-- [] Docker Compose example (community contribution needed here!)

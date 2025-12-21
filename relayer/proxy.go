@@ -524,8 +524,6 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		sessionCtx = &logging.SessionContext{ServiceID: serviceID}
 	}
 
-	relaysReceived.WithLabelValues(serviceID).Inc()
-
 	// Check if service exists
 	svcConfig, ok := p.config.Services[serviceID]
 	if !ok {
@@ -533,6 +531,19 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		relaysRejected.WithLabelValues(serviceID, "unknown_service").Inc()
 		return
 	}
+
+	// Extract rpc_type for metrics (same logic as forwardToBackend)
+	rpcTypeForMetrics := r.Header.Get("Rpc-Type")
+	if rpcTypeForMetrics == "" {
+		if svcConfig.DefaultBackend != "" {
+			rpcTypeForMetrics = svcConfig.DefaultBackend
+		} else {
+			rpcTypeForMetrics = DefaultBackendType
+		}
+	}
+	rpcTypeForMetrics = RPCTypeToBackendType(rpcTypeForMetrics)
+
+	relaysReceived.WithLabelValues(serviceID, rpcTypeForMetrics).Inc()
 
 	// Set per-request write deadline using ResponseController.
 	// This allows different timeouts per service (e.g., 30s fast vs 600s streaming).
@@ -800,7 +811,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	relaysServed.WithLabelValues(serviceID).Inc()
+	relaysServed.WithLabelValues(serviceID, rpcTypeForMetrics).Inc()
 	totalRelayDuration := time.Since(startTime)
 
 	// Record total relay latency asynchronously (no blocking on histogram locks)

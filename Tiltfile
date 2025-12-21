@@ -29,6 +29,7 @@ load("./tilt/k8s/relayer.Tiltfile", "deploy_relayers", "generate_relayer_config"
 load("./tilt/k8s/backend.Tiltfile", "deploy_backend")
 load("./tilt/k8s/nginx-backend.Tiltfile", "provision_nginx_backend")
 load("./tilt/k8s/observability.Tiltfile", "deploy_observability")
+load("./tilt/k8s/path.Tiltfile", "deploy_path")
 
 print("=" * 60)
 print("Pocket RelayMiner - Local Development Environment")
@@ -186,6 +187,11 @@ print("Deploying backend services...")
 deploy_backend(config)
 provision_nginx_backend()
 
+# Deploy PATH gateway (optional - routes relays to relayers)
+if config.get("path", {}).get("enabled", False):
+    print("Deploying PATH gateway...")
+    deploy_path(config)
+
 # Deploy observability (optional)
 if config["observability"]["enabled"]:
     print("Deploying observability stack...")
@@ -202,6 +208,8 @@ print("  - Grafana: http://localhost:{}".format(config["observability"]["grafana
 print("  - Validator Rest: http://localhost:{}".format(config["validator"]["ports"]["rest"]))
 print("  - Validator RPC: http://localhost:{}".format(config["validator"]["ports"]["rpc"]))
 print("  - Validator gRpc: http://localhost:{}".format(config["validator"]["ports"]["grpc"]))
+if config.get("path", {}).get("enabled", False):
+    print("  - PATH Gateway: http://localhost:{}".format(config["path"]["port"]))
 print()
 print("Commands:")
 print("  tilt up       - Start all services")

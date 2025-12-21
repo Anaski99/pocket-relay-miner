@@ -20,7 +20,7 @@ var (
 			Name:      "relays_received_total",
 			Help:      "Total number of relay requests received",
 		},
-		[]string{"service_id"},
+		[]string{"service_id", "rpc_type"},
 	)
 
 	relaysServed = observability.RelayerFactory.NewCounterVec(
@@ -30,7 +30,7 @@ var (
 			Name:      "relays_served_total",
 			Help:      "Total number of relay requests successfully served",
 		},
-		[]string{"service_id"},
+		[]string{"service_id", "rpc_type"},
 	)
 
 	relaysRejected = observability.RelayerFactory.NewCounterVec(
