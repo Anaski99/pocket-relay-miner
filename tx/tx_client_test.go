@@ -91,7 +91,6 @@ func TestNewTxClient_InvalidEndpoint(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: "invalid-endpoint-format",
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	// Should create client successfully (gRPC doesn't validate endpoint format upfront)
@@ -172,8 +171,7 @@ func TestNewTxClient_Defaults(t *testing.T) {
 
 	// Verify defaults were applied
 	require.Equal(t, DefaultChainID, tc.config.ChainID)
-	require.Equal(t, uint64(0), tc.config.GasLimit) // 0 means automatic (simulation)
-	require.Equal(t, DefaultGasAdjustment, tc.config.GasAdjustment)
+	require.Equal(t, uint64(DefaultGasLimit), tc.config.GasLimit)
 	require.Equal(t, uint64(DefaultTimeoutHeight), tc.config.TimeoutBlocks)
 
 	// Verify gas price has a denom (means it was initialized)
@@ -191,7 +189,6 @@ func TestTxClient_Close_Success(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -213,7 +210,6 @@ func TestTxClient_Close_AlreadyClosed(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -244,7 +240,6 @@ func TestTxClient_Close_SharedConnection(t *testing.T) {
 	config := TxClientConfig{
 		GRPCConn: conn,
 		ChainID:  "test-chain",
-		GasLimit: 100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -269,7 +264,6 @@ func TestTxClient_OperationsAfterClose(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -315,7 +309,6 @@ func TestGetAccount_Success(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -342,7 +335,6 @@ func TestGetAccount_NotFound(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -370,7 +362,6 @@ func TestGetAccount_Cached(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -409,7 +400,6 @@ func TestGetAccount_CacheInvalidation(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -450,7 +440,6 @@ func TestIncrementSequence(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -523,7 +512,6 @@ func TestCreateClaims_EmptyList(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -587,7 +575,6 @@ func TestSubmitProofs_EmptyList(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -665,7 +652,6 @@ func TestSubmitTx_NetworkTimeout(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -699,7 +685,6 @@ func TestSubmitTx_InvalidSequence(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -733,7 +718,6 @@ func TestSubmitTx_InsufficientGas(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -764,7 +748,6 @@ func TestSubmitTx_AccountNotFound(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -796,7 +779,6 @@ func TestSubmitTx_KeyNotFound(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -830,7 +812,6 @@ func TestSubmitTx_BroadcastError(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -865,7 +846,6 @@ func TestConcurrentSubmissions_SameSupplier(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -934,7 +914,6 @@ func TestConcurrentSubmissions_DifferentSuppliers(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -996,7 +975,6 @@ func TestConcurrentAccountQueries(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -1057,7 +1035,6 @@ func TestHASupplierClient_CreateClaims(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -1091,7 +1068,6 @@ func TestHASupplierClient_SubmitProofs(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -1124,7 +1100,6 @@ func TestHASupplierClient_OperatorAddress(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -1215,7 +1190,6 @@ func TestCreateClaims_ContextCanceled(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -1248,7 +1222,6 @@ func TestCreateClaims_ContextTimeout(t *testing.T) {
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
 		ChainID:      "test-chain",
-		GasLimit:     100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
