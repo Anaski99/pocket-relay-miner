@@ -17,7 +17,6 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/query"
 	"github.com/pokt-network/pocket-relay-miner/transport"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
-	"github.com/pokt-network/pocket-relay-miner/tx"
 
 	apptypes "github.com/pokt-network/poktroll/x/application/types"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
@@ -71,7 +70,6 @@ type LeaderController struct {
 	serviceCache          cache.KeyedEntityCache[string, *sharedtypes.Service]
 	supplierCache         *cache.SupplierCache
 	cacheOrchestrator     *cache.CacheOrchestrator
-	txClient              *tx.TxClient
 	proofChecker          *ProofRequirementChecker
 	supplierManager       *SupplierManager
 	balanceMonitor        *BalanceMonitor
@@ -322,23 +320,6 @@ func (c *LeaderController) Start(ctx context.Context) error {
 	)
 	c.logger.Info().Msg("proof requirement checker initialized")
 
-	// Create tx client
-	c.txClient, err = tx.NewTxClient(
-		c.logger,
-		c.config.KeyManager,
-		tx.TxClientConfig{
-			GRPCConn:      c.queryClients.GRPCConnection(),
-			ChainID:       chainID,
-			GasLimit:      tx.DefaultGasLimit,
-			TimeoutBlocks: tx.DefaultTimeoutHeight,
-		},
-	)
-	if err != nil {
-		c.cleanup()
-		return fmt.Errorf("failed to create transaction client: %w", err)
-	}
-	c.logger.Info().Msg("transaction client initialized")
-
 	// Create supplier registry
 	c.supplierRegistry = NewSupplierRegistry(
 		c.logger,
@@ -375,7 +356,11 @@ func (c *LeaderController) Start(ctx context.Context) error {
 	cachedSharedClient := cache.NewCachedSharedQueryClient(c.sharedParamsCache, c.queryClients.Shared())
 
 	// Create and start supplier manager (unless SupplierWorker is handling it)
+	// NOTE: This is legacy/dead code - SkipSupplierManager is ALWAYS true in production.
+	// Keeping for backward compatibility with old deployment modes.
 	if !c.config.SkipSupplierManager {
+		c.logger.Warn().Msg("SkipSupplierManager=false is deprecated - use SupplierWorker for distributed claiming")
+
 		c.supplierManager = NewSupplierManager(
 			c.logger,
 			c.config.KeyManager,
@@ -393,7 +378,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 				MinerID:                 c.config.Config.Redis.ConsumerName,
 				SupplierQueryClient:     c.queryClients.Supplier(),
 				WorkerPool:              c.masterPool,
-				TxClient:                c.txClient,
+				TxClient:                nil, // DEPRECATED: TxClient only used in SupplierWorker (distributed mode)
 				BlockClient:             c.blockSubscriber,
 				SharedClient:            cachedSharedClient,
 				SessionClient:           c.queryClients.Session(),
@@ -402,8 +387,6 @@ func (c *LeaderController) Start(ctx context.Context) error {
 				AppClient:               cache.NewApplicationQueryClientAdapter(c.queryClients.Application()), // For claim ceiling calculations
 				SessionLifecycleConfig: SessionLifecycleConfig{
 					CheckInterval:            0, // Event-driven
-					ClaimSubmissionBuffer:    c.config.Config.GetSessionLifecycleClaimBuffer(),
-					ProofSubmissionBuffer:    c.config.Config.GetSessionLifecycleProofBuffer(),
 					MaxConcurrentTransitions: c.config.Config.GetSessionLifecycleMaxConcurrentTransitions(),
 				},
 				EnableDistributedClaiming: true, // Always enabled
@@ -597,13 +580,6 @@ func (c *LeaderController) cleanup() {
 	// ServiceFactorRegistry doesn't have a Close method - it just holds config
 	// Keys will expire based on Redis TTL or stay until overwritten
 	c.serviceFactorRegistry = nil
-
-	if c.txClient != nil {
-		if err := c.txClient.Close(); err != nil {
-			c.logger.Error().Err(err).Msg("failed to close tx client")
-		}
-		c.txClient = nil
-	}
 
 	if c.blockPublisher != nil {
 		if err := c.blockPublisher.Close(); err != nil {

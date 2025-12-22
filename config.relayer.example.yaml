@@ -176,10 +176,6 @@ default_request_timeout_seconds: 30
 # Default max body size in bytes (used when not specified per-service)
 default_max_body_size_bytes: 10485760  # 10MB
 
-# Grace period extra blocks beyond on-chain configuration
-# Helps handle clock drift and network delays between gateway and relayer
-grace_period_extra_blocks: 2
-
 # Metrics server (Prometheus)
 metrics:
   enabled: true

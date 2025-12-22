@@ -98,39 +98,9 @@ var (
 		[]string{"supplier"},
 	)
 
-	// Gas tracking metrics
-	txGasUsed = observability.MinerFactory.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "gas_used",
-			Help:      "Actual gas consumed by transactions (from TxResponse.GasUsed)",
-			Buckets:   []float64{50000, 100000, 150000, 200000, 250000, 300000, 400000, 500000},
-		},
-		[]string{"supplier", "type"}, // type = "claim" or "proof"
-	)
-
-	txGasWanted = observability.MinerFactory.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "gas_wanted",
-			Help:      "Gas limit set for transactions (from TxResponse.GasWanted)",
-			Buckets:   []float64{50000, 100000, 150000, 200000, 250000, 300000, 400000, 500000},
-		},
-		[]string{"supplier", "type"}, // type = "claim" or "proof"
-	)
-
-	txActualFeeUpokt = observability.MinerFactory.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "actual_fee_upokt",
-			Help:      "Actual transaction fee charged in upokt (calculated as GasUsed × GasPrice)",
-			Buckets:   []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10},
-		},
-		[]string{"supplier", "type"}, // type = "claim" or "proof"
-	)
+	// NOTE: Gas tracking metrics (txGasUsed, txGasWanted, txActualFeeUpokt) removed
+	// because we use SYNC broadcast mode which returns after CheckTx only.
+	// These metrics would require BLOCK mode which waits for TX execution.
 
 	txInsufficientBalanceErrors = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{

@@ -114,6 +114,26 @@ properties:
         description: Disable TLS for gRPC connections (use for local development only)
         default: false
 
+  transaction:
+    type: object
+    description: Transaction configuration for claim/proof submission
+    properties:
+      gas_limit:
+        type: integer
+        description: Gas limit for transactions. Set to 0 for automatic gas estimation (simulation). Set to a positive value for fixed gas limit.
+        default: 0
+        minimum: 0
+      gas_price:
+        type: string
+        description: Gas price in upokt (e.g., "0.00001upokt")
+        default: "0.00001upokt"
+        pattern: ^[0-9]+(\\.[0-9]+)?upokt$
+      gas_adjustment:
+        type: number
+        description: Gas adjustment multiplier applied to simulated gas (only used when gas_limit=0)
+        default: 1.7
+        minimum: 1.0
+
   keys:
     type: object
     description: Supplier signing key configuration

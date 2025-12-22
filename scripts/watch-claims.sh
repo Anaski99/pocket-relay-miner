@@ -27,24 +27,24 @@ while true; do
     # Show sessions by state
     echo -e "${BLUE}=== Sessions by State ===${NC}"
     for state in active claiming claimed proving settled; do
-        count=$($RELAYER_BIN redis-debug sessions --supplier $SUPPLIER_ADDR --state $state 2>/dev/null | grep -c "^[a-f0-9]\{64\}" || echo "0")
+        count=$($RELAYER_BIN redis sessions --supplier $SUPPLIER_ADDR --state $state 2>/dev/null | grep -c "^[a-f0-9]\{64\}" || echo "0")
         echo -e "${GREEN}$state:${NC} $count"
     done
     echo ""
 
     # Show recent claimed sessions
     echo -e "${BLUE}=== Recently Claimed (last 5) ===${NC}"
-    $RELAYER_BIN redis-debug sessions --supplier $SUPPLIER_ADDR --state claimed 2>/dev/null | head -7 || echo "No claimed sessions yet"
+    $RELAYER_BIN redis sessions --supplier $SUPPLIER_ADDR --state claimed 2>/dev/null | head -7 || echo "No claimed sessions yet"
     echo ""
 
     # Show Redis Streams stats
     echo -e "${BLUE}=== Redis Streams ===${NC}"
-    $RELAYER_BIN redis-debug streams --supplier $SUPPLIER_ADDR 2>/dev/null | head -5 || echo "No stream data"
+    $RELAYER_BIN redis streams --supplier $SUPPLIER_ADDR 2>/dev/null | head -5 || echo "No stream data"
     echo ""
 
     # Show all sessions summary
     echo -e "${BLUE}=== All Sessions (top 10) ===${NC}"
-    $RELAYER_BIN redis-debug sessions --supplier $SUPPLIER_ADDR 2>/dev/null | head -12
+    $RELAYER_BIN redis sessions --supplier $SUPPLIER_ADDR 2>/dev/null | head -12
 
     # Wait before refresh
     sleep 3

@@ -96,6 +96,26 @@ func (m *mockTxServiceServer) BroadcastTx(
 	}, nil
 }
 
+// GetTx implements the GetTx method for testing TX commit verification
+func (m *mockTxServiceServer) GetTx(
+	ctx context.Context,
+	req *txtypes.GetTxRequest,
+) (*txtypes.GetTxResponse, error) {
+	m.mu.Helper()
+
+	// Return the same response as broadcast - simulates successful TX execution
+	// In production, this would query the blockchain for the TX by hash
+	return &txtypes.GetTxResponse{
+		TxResponse: &cosmostypes.TxResponse{
+			Height:    100,
+			TxHash:    req.Hash,
+			Code:      m.broadcastCode,   // Use same code as broadcast
+			RawLog:    m.broadcastRawLog, // Use same log as broadcast
+			Codespace: "sdk",
+		},
+	}, nil
+}
+
 // testGRPCServer encapsulates the test gRPC server setup
 type testGRPCServer struct {
 	server     *grpc.Server

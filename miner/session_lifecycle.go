@@ -23,15 +23,6 @@ type SessionLifecycleConfig struct {
 	// Default: 1 (every block)
 	CheckIntervalBlocks int64
 
-	// ClaimSubmissionBuffer is blocks before window close to start claiming.
-	// This provides buffer time for transaction confirmation.
-	// Default: 2
-	ClaimSubmissionBuffer int64
-
-	// ProofSubmissionBuffer is blocks before window close to start proving.
-	// Default: 2
-	ProofSubmissionBuffer int64
-
 	// MaxConcurrentTransitions is the max number of sessions transitioning at once.
 	// Default: 10
 	MaxConcurrentTransitions int
@@ -46,8 +37,6 @@ type SessionLifecycleConfig struct {
 func DefaultSessionLifecycleConfig() SessionLifecycleConfig {
 	return SessionLifecycleConfig{
 		CheckIntervalBlocks:      1,
-		ClaimSubmissionBuffer:    2,
-		ProofSubmissionBuffer:    2,
 		MaxConcurrentTransitions: 10,
 	}
 }
@@ -128,12 +117,6 @@ func NewSessionLifecycleManager(
 ) *SessionLifecycleManager {
 	if config.CheckIntervalBlocks <= 0 {
 		config.CheckIntervalBlocks = 1
-	}
-	if config.ClaimSubmissionBuffer <= 0 {
-		config.ClaimSubmissionBuffer = 2
-	}
-	if config.ProofSubmissionBuffer <= 0 {
-		config.ProofSubmissionBuffer = 2
 	}
 	if config.MaxConcurrentTransitions <= 0 {
 		// Dynamic allocation: 25% of (NumCPU * 2) for mixed workload (crypto + network)
@@ -594,7 +577,6 @@ func (m *SessionLifecycleManager) determineTransition(
 			Int64("session_end", session.SessionEndHeight).
 			Int64("claim_window_open", claimWindowOpen).
 			Int64("claim_window_close", claimWindowClose).
-			Int64("claim_submission_buffer", m.config.ClaimSubmissionBuffer).
 			Msg("evaluating active session window")
 
 		// If claim window has passed without claiming, session expired
@@ -602,20 +584,10 @@ func (m *SessionLifecycleManager) determineTransition(
 			return SessionStateExpired, "claim_window_missed"
 		}
 
-		// If we're in the claim window (including buffer zone), transition to claiming
-		// The buffer zone is for giving tx confirmation time, but if we're late starting,
-		// we should still try to claim rather than just waiting to expire
+		// If we're in the claim window, transition to claiming
+		// Protocol handles submission timing via GetEarliestSupplierClaimCommitHeight()
+		// Pre-submission checks in lifecycle_callback ensure sufficient time remaining
 		if currentHeight >= claimWindowOpen && currentHeight < claimWindowClose {
-			if currentHeight >= claimWindowClose-m.config.ClaimSubmissionBuffer {
-				// We're in the buffer zone - log warning but still try to claim
-				m.logger.Warn().
-					Str("session_id", session.SessionID).
-					Int64("current_height", currentHeight).
-					Int64("claim_window_close", claimWindowClose).
-					Int64("blocks_remaining", claimWindowClose-currentHeight).
-					Msg("LATE CLAIM: starting claim in buffer zone - tx may not confirm in time")
-				return SessionStateClaiming, "claim_window_late"
-			}
 			return SessionStateClaiming, "claim_window_open"
 		}
 
@@ -639,20 +611,10 @@ func (m *SessionLifecycleManager) determineTransition(
 			return SessionStateSettled, "proof_window_passed"
 		}
 
-		// If we're in the proof window (including buffer zone), transition to proving
-		// The buffer zone is for giving tx confirmation time, but if we're late starting,
-		// we should still try to prove rather than just waiting
+		// If we're in the proof window, transition to proving
+		// Protocol handles submission timing via GetEarliestSupplierProofCommitHeight()
+		// Pre-submission checks in lifecycle_callback ensure sufficient time remaining
 		if currentHeight >= proofWindowOpen && currentHeight < proofWindowClose {
-			if currentHeight >= proofWindowClose-m.config.ProofSubmissionBuffer {
-				// We're in the buffer zone - log warning but still try to prove
-				m.logger.Warn().
-					Str("session_id", session.SessionID).
-					Int64("current_height", currentHeight).
-					Int64("proof_window_close", proofWindowClose).
-					Int64("blocks_remaining", proofWindowClose-currentHeight).
-					Msg("LATE PROOF: starting proof in buffer zone - tx may not confirm in time")
-				return SessionStateProving, "proof_window_late"
-			}
 			return SessionStateProving, "proof_window_open"
 		}
 

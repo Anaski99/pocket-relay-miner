@@ -551,11 +551,10 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 			// Create caches for full session validation
 			cacheConfig := cache.CacheConfig{
-				CachePrefix:            "ha:cache",
-				PubSubPrefix:           "ha:events",
-				TTLBlocks:              1,
-				BlockTimeSeconds:       30, // CRITICAL: Must match actual block time (30s for this network, not 6s!)
-				ExtraGracePeriodBlocks: config.GracePeriodExtraBlocks,
+				CachePrefix:      "ha:cache",
+				PubSubPrefix:     "ha:events",
+				TTLBlocks:        1,
+				BlockTimeSeconds: 30, // CRITICAL: Must match actual block time (30s for this network, not 6s!)
 			}
 
 			// Create SharedParamCache for shared parameter caching
@@ -594,7 +593,6 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			// - Application staking status (via session query)
 			validatorConfig := &relayer.ValidatorConfig{
 				AllowedSupplierAddresses: responseSigner.GetOperatorAddresses(),
-				GracePeriodExtraBlocks:   config.GracePeriodExtraBlocks,
 			}
 			fullValidator := relayer.NewRelayValidator(
 				logger,
@@ -606,7 +604,6 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			proxy.SetValidator(fullValidator)
 			logger.Info().
 				Int("allowed_suppliers", len(validatorConfig.AllowedSupplierAddresses)).
-				Int64("grace_period_extra_blocks", validatorConfig.GracePeriodExtraBlocks).
 				Msg("full relay validator initialized with session validation")
 
 			// Create RelayProcessor for proper relay mining with session metadata

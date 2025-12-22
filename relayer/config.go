@@ -133,10 +133,6 @@ type Config struct {
 	// HealthCheck configuration for the relayer itself
 	HealthCheck HealthCheckConfig `yaml:"health_check"`
 
-	// GracePeriodExtraBlocks is additional grace period blocks beyond on-chain config.
-	// Helps handle clock drift and network delays between gateway and relayer.
-	GracePeriodExtraBlocks int64 `yaml:"grace_period_extra_blocks"`
-
 	// CacheWarmup configuration for pre-warming caches at startup.
 	CacheWarmup CacheWarmupConfig `yaml:"cache_warmup,omitempty"`
 
@@ -454,7 +450,6 @@ func DefaultConfig() Config {
 		DefaultValidationMode:        ValidationModeOptimistic,
 		DefaultRequestTimeoutSeconds: 30,
 		DefaultMaxBodySizeBytes:      10 * 1024 * 1024, // 10MB
-		GracePeriodExtraBlocks:       2,
 		Metrics: MetricsConfig{
 			Enabled: true,
 			Addr:    "0.0.0.0:9090",

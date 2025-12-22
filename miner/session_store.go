@@ -69,6 +69,12 @@ type SessionSnapshot struct {
 	// ClaimedRootHash is the SMST root hash (set after flush).
 	ClaimedRootHash []byte `json:"claimed_root_hash,omitempty"`
 
+	// ClaimTxHash is the transaction hash of the submitted claim (for deduplication).
+	ClaimTxHash string `json:"claim_tx_hash,omitempty"`
+
+	// ProofTxHash is the transaction hash of the submitted proof (for deduplication).
+	ProofTxHash string `json:"proof_tx_hash,omitempty"`
+
 	// LastWALEntryID is the last WAL entry ID that was processed.
 	// Used for recovery to know where to start replaying from.
 	LastWALEntryID string `json:"last_wal_entry_id,omitempty"`

@@ -109,7 +109,7 @@ func TestNewTxClient_InvalidEndpoint(t *testing.T) {
 		generateTestClaim(t, "pokt1supplier123", "session-1"),
 	}
 
-	err = tc.CreateClaims(ctx, "pokt1supplier123", claims)
+	_, err = tc.CreateClaims(ctx, "pokt1supplier123", 1000, claims)
 	require.Error(t, err)
 }
 
@@ -278,7 +278,7 @@ func TestTxClient_OperationsAfterClose(t *testing.T) {
 	}
 
 	// Operations should fail after close
-	err = tc.CreateClaims(ctx, "pokt1supplier123", claims)
+	_, err = tc.CreateClaims(ctx, "pokt1supplier123", 1000, claims)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "closed")
 
@@ -286,7 +286,7 @@ func TestTxClient_OperationsAfterClose(t *testing.T) {
 		generateTestProof(t, "pokt1supplier123", "session-1"),
 	}
 
-	err = tc.SubmitProofs(ctx, "pokt1supplier123", proofs)
+	_, err = tc.SubmitProofs(ctx, "pokt1supplier123", 1000, proofs)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "closed")
 }
@@ -453,13 +453,8 @@ func TestIncrementSequence(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(10), account.Sequence)
 
-	// Increment sequence
-	tc.incrementSequence(supplierAddr)
-	assertAccountInCache(t, tc, supplierAddr, 11)
-
-	// Increment again
-	tc.incrementSequence(supplierAddr)
-	assertAccountInCache(t, tc, supplierAddr, 12)
+	// NOTE: incrementSequence() removed - not needed for unordered transactions
+	// Sequence numbers are not used with unordered transactions
 }
 
 // =============================================================================
@@ -494,14 +489,14 @@ func TestCreateClaims_Success(t *testing.T) {
 		generateTestClaim(t, supplierAddr, "session-2"),
 	}
 
-	err = tc.CreateClaims(ctx, supplierAddr, claims)
+	txHash, err := tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 	require.NoError(t, err)
+	require.NotEmpty(t, txHash)
 
 	// Verify broadcast was called
 	require.Equal(t, 1, testServer.getBroadcastCount())
 
-	// Verify sequence was incremented
-	assertAccountInCache(t, tc, supplierAddr, 1)
+	// NOTE: Sequence increment check removed - unordered transactions don't use sequences
 }
 
 func TestCreateClaims_EmptyList(t *testing.T) {
@@ -524,7 +519,7 @@ func TestCreateClaims_EmptyList(t *testing.T) {
 	defer tc.Close()
 
 	ctx := context.Background()
-	err = tc.CreateClaims(ctx, supplierAddr, nil)
+	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, nil)
 	require.NoError(t, err)
 
 	// No broadcast should have occurred
@@ -558,14 +553,13 @@ func TestSubmitProofs_Success(t *testing.T) {
 		generateTestProof(t, supplierAddr, "session-1"),
 	}
 
-	err = tc.SubmitProofs(ctx, supplierAddr, proofs)
+	_, err = tc.SubmitProofs(ctx, supplierAddr, 1000, proofs)
 	require.NoError(t, err)
 
 	// Verify broadcast was called
 	require.Equal(t, 1, testServer.getBroadcastCount())
 
-	// Verify sequence was incremented
-	assertAccountInCache(t, tc, supplierAddr, 1)
+	// NOTE: Sequence check removed - unordered transactions don't use account sequences
 }
 
 func TestSubmitProofs_EmptyList(t *testing.T) {
@@ -588,7 +582,7 @@ func TestSubmitProofs_EmptyList(t *testing.T) {
 	defer tc.Close()
 
 	ctx := context.Background()
-	err = tc.SubmitProofs(ctx, supplierAddr, nil)
+	_, err = tc.SubmitProofs(ctx, supplierAddr, 1000, nil)
 	require.NoError(t, err)
 
 	// No broadcast should have occurred
@@ -628,7 +622,7 @@ func TestSignAndBroadcast_GasEstimation(t *testing.T) {
 		generateTestClaim(t, supplierAddr, "session-1"),
 	}
 
-	err = tc.CreateClaims(ctx, supplierAddr, claims)
+	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 	require.NoError(t, err)
 
 	// Verify fee calculation matches our expectation
@@ -669,7 +663,7 @@ func TestSubmitTx_NetworkTimeout(t *testing.T) {
 		generateTestClaim(t, supplierAddr, "session-1"),
 	}
 
-	err = tc.CreateClaims(ctx, supplierAddr, claims)
+	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "deadline exceeded")
 }
@@ -702,7 +696,7 @@ func TestSubmitTx_InvalidSequence(t *testing.T) {
 		generateTestClaim(t, supplierAddr, "session-1"),
 	}
 
-	err = tc.CreateClaims(ctx, supplierAddr, claims)
+	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "sequence mismatch")
 }
@@ -735,7 +729,7 @@ func TestSubmitTx_InsufficientGas(t *testing.T) {
 		generateTestClaim(t, supplierAddr, "session-1"),
 	}
 
-	err = tc.CreateClaims(ctx, supplierAddr, claims)
+	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "out of gas")
 }
@@ -765,7 +759,7 @@ func TestSubmitTx_AccountNotFound(t *testing.T) {
 		generateTestClaim(t, supplierAddr, "session-1"),
 	}
 
-	err = tc.CreateClaims(ctx, supplierAddr, claims)
+	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not found")
 }
@@ -796,7 +790,7 @@ func TestSubmitTx_KeyNotFound(t *testing.T) {
 		generateTestClaim(t, supplierAddr, "session-1"),
 	}
 
-	err = tc.CreateClaims(ctx, supplierAddr, claims)
+	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no key found")
 }
@@ -829,7 +823,7 @@ func TestSubmitTx_BroadcastError(t *testing.T) {
 		generateTestClaim(t, supplierAddr, "session-1"),
 	}
 
-	err = tc.CreateClaims(ctx, supplierAddr, claims)
+	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "network error")
 }
@@ -874,7 +868,7 @@ func TestConcurrentSubmissions_SameSupplier(t *testing.T) {
 				generateTestClaim(t, supplierAddr, fmt.Sprintf("session-%d", idx)),
 			}
 
-			err := tc.CreateClaims(ctx, supplierAddr, claims)
+			_, err := tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 			if err != nil {
 				errors <- err
 			}
@@ -896,8 +890,7 @@ func TestConcurrentSubmissions_SameSupplier(t *testing.T) {
 	// Verify all transactions were broadcast
 	require.Equal(t, numGoroutines, testServer.getBroadcastCount())
 
-	// Verify sequence was incremented correctly
-	assertAccountInCache(t, tc, supplierAddr, uint64(numGoroutines))
+	// NOTE: Sequence check removed - unordered transactions don't use account sequences
 }
 
 func TestConcurrentSubmissions_DifferentSuppliers(t *testing.T) {
@@ -943,7 +936,7 @@ func TestConcurrentSubmissions_DifferentSuppliers(t *testing.T) {
 					generateTestClaim(t, addr, fmt.Sprintf("session-%s-%d", addr, idx)),
 				}
 
-				err := tc.CreateClaims(ctx, addr, claims)
+				_, err := tc.CreateClaims(ctx, addr, 1000, claims)
 				if err != nil {
 					errors <- err
 				}
@@ -963,10 +956,9 @@ func TestConcurrentSubmissions_DifferentSuppliers(t *testing.T) {
 	// All submissions should succeed
 	require.Empty(t, errs, "expected no errors, got: %v", errs)
 
-	// Each supplier should have sequence = 3
-	for _, supplier := range suppliers {
-		assertAccountInCache(t, tc, supplier, 3)
-	}
+	// NOTE: Sequence check removed - unordered transactions don't use account sequences
+	// Verify total broadcasts (3 suppliers × 3 submissions each)
+	require.Equal(t, len(suppliers)*3, testServer.getBroadcastCount())
 }
 
 func TestConcurrentAccountQueries(t *testing.T) {
@@ -1212,7 +1204,7 @@ func TestCreateClaims_ContextCanceled(t *testing.T) {
 		generateTestClaim(t, supplierAddr, "session-1"),
 	}
 
-	err = tc.CreateClaims(ctx, supplierAddr, claims)
+	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 	require.Error(t, err)
 }
 
@@ -1246,6 +1238,6 @@ func TestCreateClaims_ContextTimeout(t *testing.T) {
 		generateTestClaim(t, supplierAddr, "session-1"),
 	}
 
-	err = tc.CreateClaims(ctx, supplierAddr, claims)
+	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 	require.Error(t, err)
 }

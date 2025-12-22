@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	pond "github.com/alitto/pond/v2"
+	cosmostypes "github.com/cosmos/cosmos-sdk/types"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/keys"
@@ -224,13 +225,22 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 	)
 
 	// Create tx client
+	// Parse gas price from config
+	gasPrice, err := cosmostypes.ParseDecCoin(w.config.Config.GetTxGasPrice())
+	if err != nil {
+		w.cleanup()
+		return fmt.Errorf("failed to parse gas price: %w", err)
+	}
+
 	w.txClient, err = tx.NewTxClient(
 		w.logger,
 		w.config.KeyManager,
 		tx.TxClientConfig{
 			GRPCConn:      w.queryClients.GRPCConnection(),
 			ChainID:       chainID,
-			GasLimit:      tx.DefaultGasLimit,
+			GasLimit:      w.config.Config.GetTxGasLimit(),
+			GasPrice:      gasPrice,
+			GasAdjustment: w.config.Config.GetTxGasAdjustment(),
 			TimeoutBlocks: tx.DefaultTimeoutHeight,
 		},
 	)
@@ -291,8 +301,6 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			AppClient:               cache.NewApplicationQueryClientAdapter(w.queryClients.Application()),
 			SessionLifecycleConfig: SessionLifecycleConfig{
 				CheckInterval:            0, // Event-driven via Redis pub/sub
-				ClaimSubmissionBuffer:    w.config.Config.GetSessionLifecycleClaimBuffer(),
-				ProofSubmissionBuffer:    w.config.Config.GetSessionLifecycleProofBuffer(),
 				MaxConcurrentTransitions: w.config.Config.GetSessionLifecycleMaxConcurrentTransitions(),
 			},
 			EnableDistributedClaiming: true, // Always enabled

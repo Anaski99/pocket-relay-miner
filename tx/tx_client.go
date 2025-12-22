@@ -32,11 +32,15 @@ import (
 )
 
 const (
-	// DefaultGasLimit is the default gas limit for transactions.
+	// DefaultGasLimit is the default gas limit for transactions when not using simulation.
 	DefaultGasLimit = 500000
 
 	// DefaultGasPrice is the default gas price in upokt.
 	DefaultGasPrice = "0.000001upokt"
+
+	// DefaultGasAdjustment is the default multiplier for simulated gas.
+	// Applied when GasLimit=0 (auto) to add safety margin: actual_gas = simulated_gas * adjustment
+	DefaultGasAdjustment = 1.5
 
 	// DefaultTimeoutHeight is the number of blocks after which a transaction times out.
 	DefaultTimeoutHeight = 100
@@ -60,10 +64,19 @@ type TxClientConfig struct {
 	ChainID string
 
 	// GasLimit is the gas limit for transactions.
+	// Set to 0 for automatic gas estimation (simulation).
+	// Set to a positive value for a fixed gas limit.
+	// Default: 500000
 	GasLimit uint64
 
 	// GasPrice is the gas price for transactions.
 	GasPrice cosmostypes.DecCoin
+
+	// GasAdjustment is the multiplier applied to simulated gas to add safety margin.
+	// Only used when GasLimit=0 (automatic simulation).
+	// Actual gas = simulated_gas * GasAdjustment
+	// Default: 1.5 (adds 50% safety margin)
+	GasAdjustment float64
 
 	// TimeoutBlocks is the number of blocks after which a transaction times out.
 	TimeoutBlocks uint64
@@ -128,6 +141,9 @@ func NewTxClient(
 	}
 	if config.TimeoutBlocks == 0 {
 		config.TimeoutBlocks = DefaultTimeoutHeight
+	}
+	if config.GasAdjustment == 0 {
+		config.GasAdjustment = DefaultGasAdjustment
 	}
 
 	var grpcConn *grpc.ClientConn
@@ -201,20 +217,22 @@ func createCodecAndTxConfig() (codec.Codec, client.TxConfig) {
 }
 
 // CreateClaims creates and submits claim transactions for a supplier.
+// Returns the TX hash for deduplication tracking.
 func (tc *TxClient) CreateClaims(
 	ctx context.Context,
 	supplierOperatorAddr string,
+	timeoutHeight int64,
 	claims []*prooftypes.MsgCreateClaim,
-) error {
+) (string, error) {
 	tc.mu.RLock()
 	if tc.closed {
 		tc.mu.RUnlock()
-		return fmt.Errorf("tx client is closed")
+		return "", fmt.Errorf("tx client is closed")
 	}
 	tc.mu.RUnlock()
 
 	if len(claims) == 0 {
-		return nil
+		return "", nil
 	}
 
 	// Convert claims to Msg interface
@@ -223,10 +241,10 @@ func (tc *TxClient) CreateClaims(
 		msgs[i] = claim
 	}
 
-	txHash, err := tc.signAndBroadcast(ctx, supplierOperatorAddr, "claim", msgs...)
+	txHash, err := tc.signAndBroadcast(ctx, supplierOperatorAddr, uint64(timeoutHeight), "claim", msgs...)
 	if err != nil {
 		txClaimErrors.WithLabelValues(supplierOperatorAddr, "broadcast").Inc()
-		return fmt.Errorf("failed to broadcast claims: %w", err)
+		return "", fmt.Errorf("failed to broadcast claims: %w", err)
 	}
 
 	tc.logger.Info().
@@ -236,24 +254,26 @@ func (tc *TxClient) CreateClaims(
 		Msg("claims submitted")
 
 	txClaimsSubmitted.WithLabelValues(supplierOperatorAddr).Add(float64(len(claims)))
-	return nil
+	return txHash, nil
 }
 
 // SubmitProofs submits proof transactions for a supplier.
+// Returns the TX hash for deduplication tracking.
 func (tc *TxClient) SubmitProofs(
 	ctx context.Context,
 	supplierOperatorAddr string,
+	timeoutHeight int64,
 	proofs []*prooftypes.MsgSubmitProof,
-) error {
+) (string, error) {
 	tc.mu.RLock()
 	if tc.closed {
 		tc.mu.RUnlock()
-		return fmt.Errorf("tx client is closed")
+		return "", fmt.Errorf("tx client is closed")
 	}
 	tc.mu.RUnlock()
 
 	if len(proofs) == 0 {
-		return nil
+		return "", nil
 	}
 
 	// Convert proofs to Msg interface
@@ -262,10 +282,10 @@ func (tc *TxClient) SubmitProofs(
 		msgs[i] = proof
 	}
 
-	txHash, err := tc.signAndBroadcast(ctx, supplierOperatorAddr, "proof", msgs...)
+	txHash, err := tc.signAndBroadcast(ctx, supplierOperatorAddr, uint64(timeoutHeight), "proof", msgs...)
 	if err != nil {
 		txProofErrors.WithLabelValues(supplierOperatorAddr, "broadcast").Inc()
-		return fmt.Errorf("failed to broadcast proofs: %w", err)
+		return "", fmt.Errorf("failed to broadcast proofs: %w", err)
 	}
 
 	tc.logger.Info().
@@ -275,7 +295,7 @@ func (tc *TxClient) SubmitProofs(
 		Msg("proofs submitted")
 
 	txProofsSubmitted.WithLabelValues(supplierOperatorAddr).Add(float64(len(proofs)))
-	return nil
+	return txHash, nil
 }
 
 // signAndBroadcast signs and broadcasts a transaction.
@@ -283,6 +303,7 @@ func (tc *TxClient) SubmitProofs(
 func (tc *TxClient) signAndBroadcast(
 	ctx context.Context,
 	signerAddr string,
+	timeoutHeight uint64,
 	txType string,
 	msgs ...cosmostypes.Msg,
 ) (string, error) {
@@ -312,16 +333,55 @@ func (tc *TxClient) signAndBroadcast(
 		return "", fmt.Errorf("failed to set messages: %w", setMsgsErr)
 	}
 
-	// Set gas and fees
-	txBuilder.SetGasLimit(tc.config.GasLimit)
-	feeAmount := tc.calculateFee()
+	// Determine gas limit and fees
+	var gasLimit uint64
+	var feeAmount cosmostypes.Coins
+
+	if tc.config.GasLimit == 0 {
+		// Automatic gas estimation: simulate transaction to estimate gas
+		simGas, simErr := tc.simulateTx(ctx, txBuilder, privKey, account)
+		if simErr != nil {
+			// Simulation failed and no fallback gas limit configured
+			return "", fmt.Errorf("gas simulation failed (gas_limit=0 requires successful simulation): %w", simErr)
+		}
+
+		// Apply gas adjustment for safety margin
+		gasLimit = uint64(float64(simGas) * tc.config.GasAdjustment)
+		tc.logger.Debug().
+			Str("supplier", signerAddr).
+			Uint64("simulated_gas", simGas).
+			Float64("gas_adjustment", tc.config.GasAdjustment).
+			Uint64("final_gas_limit", gasLimit).
+			Msg("gas simulation succeeded")
+
+		feeAmount = tc.calculateFeeForGas(gasLimit)
+	} else {
+		// Use explicit gas limit
+		gasLimit = tc.config.GasLimit
+		feeAmount = tc.calculateFee()
+	}
+
+	// Set gas limit and fees
+	txBuilder.SetGasLimit(gasLimit)
 	txBuilder.SetFeeAmount(feeAmount)
 
 	// Set memo (optional)
 	txBuilder.SetMemo("HA RelayMiner")
 
-	// Sign the transaction
-	err = tc.signTx(ctx, txBuilder, privKey, account)
+	// Set unordered=true to eliminate account sequence issues
+	// With unordered, TXs don't check sequence numbers and can be included in any order
+	txBuilder.SetUnordered(true)
+
+	// Set timeout timestamp (required for unordered TXs)
+	// Cosmos SDK requires time.Time for unordered TXs
+	// Use 2 minute timeout - sufficient for TX inclusion
+	// The timeoutHeight parameter is ignored for unordered TXs (only used for logging)
+	timeoutDuration := 2 * time.Minute
+	timeoutTimestamp := time.Now().Add(timeoutDuration)
+	txBuilder.SetTimeoutTimestamp(timeoutTimestamp)
+
+	// Sign the transaction (unordered=true means sequence=0)
+	err = tc.signTx(ctx, txBuilder, privKey, account, true)
 	if err != nil {
 		return "", fmt.Errorf("failed to sign transaction: %w", err)
 	}
@@ -332,7 +392,9 @@ func (tc *TxClient) signAndBroadcast(
 		return "", fmt.Errorf("failed to encode transaction: %w", err)
 	}
 
-	// Broadcast the transaction
+	// Broadcast in SYNC mode (returns after CheckTx, fast)
+	// Using unordered eliminates sequence mismatch issues
+	// Duplicate protection handled by caller via Redis tracking
 	res, err := tc.txClient.BroadcastTx(ctx, &txtypes.BroadcastTxRequest{
 		TxBytes: txBytes,
 		Mode:    txtypes.BroadcastMode_BROADCAST_MODE_SYNC,
@@ -341,51 +403,48 @@ func (tc *TxClient) signAndBroadcast(
 		return "", fmt.Errorf("failed to broadcast transaction: %w", err)
 	}
 
+	txHash := res.TxResponse.TxHash
+
+	// Check result (SYNC mode returns CheckTx result only)
 	if res.TxResponse.Code != 0 {
-		// Check for insufficient balance error
+		// CheckTx failed
 		if isInsufficientBalanceError(res.TxResponse.RawLog) {
 			txInsufficientBalanceErrors.WithLabelValues(signerAddr).Inc()
-			tc.logger.Warn().
-				Str("supplier", signerAddr).
-				Str("tx_type", txType).
-				Str("error", res.TxResponse.RawLog).
-				Msg("transaction failed due to insufficient balance")
 		}
 
-		// Check for sequence mismatch error and invalidate cache
 		if isSequenceMismatchError(res.TxResponse.RawLog) {
+			// Should NOT happen with unordered=true, but handle anyway
 			tc.logger.Warn().
 				Str("supplier", signerAddr).
 				Str("tx_type", txType).
 				Str("error", res.TxResponse.RawLog).
-				Msg("account sequence mismatch detected, invalidating cache for retry")
+				Msg("sequence mismatch with unordered TX (unexpected)")
 			tc.InvalidateAccount(signerAddr)
 		}
 
-		return res.TxResponse.TxHash, fmt.Errorf("transaction failed: %s", res.TxResponse.RawLog)
+		tc.logger.Warn().
+			Str("supplier", signerAddr).
+			Str("tx_type", txType).
+			Str("tx_hash", txHash).
+			Uint32("code", res.TxResponse.Code).
+			Str("error", res.TxResponse.RawLog).
+			Msg("transaction CheckTx failed")
+
+		return txHash, fmt.Errorf("CheckTx failed (code %d): %s", res.TxResponse.Code, res.TxResponse.RawLog)
 	}
 
-	// Track gas metrics from successful transaction
-	txGasUsed.WithLabelValues(signerAddr, txType).Observe(float64(res.TxResponse.GasUsed))
-	txGasWanted.WithLabelValues(signerAddr, txType).Observe(float64(res.TxResponse.GasWanted))
-
-	// Calculate and track actual fee charged
-	actualFeeUpokt := tc.calculateActualFee(res.TxResponse.GasUsed)
-	txActualFeeUpokt.WithLabelValues(signerAddr, txType).Observe(actualFeeUpokt)
-
-	tc.logger.Debug().
+	// CheckTx passed! TX accepted to mempool
+	tc.logger.Info().
 		Str("supplier", signerAddr).
 		Str("tx_type", txType).
-		Int64("gas_used", res.TxResponse.GasUsed).
-		Int64("gas_wanted", res.TxResponse.GasWanted).
-		Float64("actual_fee_upokt", actualFeeUpokt).
-		Msg("transaction gas metrics tracked")
+		Str("tx_hash", txHash).
+		Time("timeout_timestamp", timeoutTimestamp).
+		Msg("transaction accepted to mempool (unordered)")
 
-	// Increment account sequence for next transaction
-	tc.incrementSequence(signerAddr)
+	// NOTE: We don't increment sequence for unordered TXs (they don't use sequence numbers)
 
 	txBroadcastsTotal.WithLabelValues(signerAddr, "success").Inc()
-	return res.TxResponse.TxHash, nil
+	return txHash, nil
 }
 
 // signTx signs a transaction with the given private key.
@@ -394,9 +453,16 @@ func (tc *TxClient) signTx(
 	txBuilder client.TxBuilder,
 	privKey cryptotypes.PrivKey,
 	account *authtypes.BaseAccount,
+	unordered bool,
 ) error {
 	pubKey := privKey.PubKey()
 	signMode := signing.SignMode_SIGN_MODE_DIRECT
+
+	// For unordered transactions, sequence MUST be 0
+	sequence := account.Sequence
+	if unordered {
+		sequence = 0
+	}
 
 	// Set signature info placeholder
 	sigV2 := signing.SignatureV2{
@@ -405,7 +471,7 @@ func (tc *TxClient) signTx(
 			SignMode:  signMode,
 			Signature: nil,
 		},
-		Sequence: account.Sequence,
+		Sequence: sequence,
 	}
 
 	if err := txBuilder.SetSignatures(sigV2); err != nil {
@@ -416,7 +482,7 @@ func (tc *TxClient) signTx(
 	signerData := authsigning.SignerData{
 		ChainID:       tc.config.ChainID,
 		AccountNumber: account.AccountNumber,
-		Sequence:      account.Sequence,
+		Sequence:      sequence,
 		PubKey:        pubKey,
 		Address:       account.Address,
 	}
@@ -490,15 +556,7 @@ func (tc *TxClient) getAccount(ctx context.Context, addr string) (*authtypes.Bas
 	return &account, nil
 }
 
-// incrementSequence increments the cached sequence number.
-func (tc *TxClient) incrementSequence(addr string) {
-	tc.accountCacheMu.Lock()
-	defer tc.accountCacheMu.Unlock()
-
-	if account, ok := tc.accountCache[addr]; ok {
-		account.Sequence++
-	}
-}
+// NOTE: incrementSequence() removed - not needed for unordered transactions in SYNC mode
 
 // InvalidateAccount removes an account from the cache.
 func (tc *TxClient) InvalidateAccount(addr string) {
@@ -507,10 +565,50 @@ func (tc *TxClient) InvalidateAccount(addr string) {
 	delete(tc.accountCache, addr)
 }
 
-// calculateFee calculates the transaction fee based on gas limit.
+// NOTE: waitForTxCommit() removed - not needed in SYNC mode (doesn't wait for commit)
+
+// simulateTx simulates a transaction to estimate gas usage.
+func (tc *TxClient) simulateTx(
+	ctx context.Context,
+	txBuilder client.TxBuilder,
+	privKey cryptotypes.PrivKey,
+	account *authtypes.BaseAccount,
+) (uint64, error) {
+	// Sign with unordered=true to match actual broadcast (for accurate gas estimation)
+	if err := tc.signTx(ctx, txBuilder, privKey, account, true); err != nil {
+		return 0, fmt.Errorf("failed to sign transaction for simulation: %w", err)
+	}
+
+	// Encode the transaction
+	txBytes, err := tc.txConfig.TxEncoder()(txBuilder.GetTx())
+	if err != nil {
+		return 0, fmt.Errorf("failed to encode transaction for simulation: %w", err)
+	}
+
+	// Simulate the transaction
+	simRes, err := tc.txClient.Simulate(ctx, &txtypes.SimulateRequest{
+		TxBytes: txBytes,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("simulation failed: %w", err)
+	}
+
+	if simRes.GasInfo == nil {
+		return 0, fmt.Errorf("simulation returned nil gas info")
+	}
+
+	return simRes.GasInfo.GasUsed, nil
+}
+
+// calculateFee calculates the transaction fee based on configured gas limit.
 // This is the MAXIMUM fee we're willing to pay (set before broadcast).
 func (tc *TxClient) calculateFee() cosmostypes.Coins {
-	gasLimitDec := math.LegacyNewDec(int64(tc.config.GasLimit))
+	return tc.calculateFeeForGas(tc.config.GasLimit)
+}
+
+// calculateFeeForGas calculates the transaction fee for a given gas limit.
+func (tc *TxClient) calculateFeeForGas(gasLimit uint64) cosmostypes.Coins {
+	gasLimitDec := math.LegacyNewDec(int64(gasLimit))
 	feeAmount := tc.config.GasPrice.Amount.Mul(gasLimitDec)
 
 	// Truncate and add 1 if there's a remainder to ensure we don't underpay
@@ -522,18 +620,7 @@ func (tc *TxClient) calculateFee() cosmostypes.Coins {
 	return cosmostypes.NewCoins(cosmostypes.NewCoin(tc.config.GasPrice.Denom, feeInt))
 }
 
-// calculateActualFee calculates the ACTUAL fee charged based on gas used.
-// Formula: actual_fee = GasUsed × GasPrice
-// Returns fee amount in upokt.
-func (tc *TxClient) calculateActualFee(gasUsed int64) float64 {
-	gasUsedDec := math.LegacyNewDec(gasUsed)
-	feeAmount := tc.config.GasPrice.Amount.Mul(gasUsedDec)
-
-	// Convert to float64 for metrics (assumes denom is upokt)
-	// Example: 100000 gas × 0.000001 upokt/gas = 0.1 upokt
-	feeFloat, _ := feeAmount.Float64()
-	return feeFloat
-}
+// NOTE: calculateActualFee() removed - not available in SYNC mode (only CheckTx, no execution result)
 
 // isInsufficientBalanceError checks if the error message indicates insufficient balance.
 func isInsufficientBalanceError(errorMsg string) bool {
@@ -602,6 +689,14 @@ type HASupplierClient struct {
 	txClient     *TxClient
 	operatorAddr string
 	logger       logging.Logger
+
+	// lastClaimTxHash stores the TX hash of the last claim submission (for deduplication)
+	lastClaimTxHash string
+	lastClaimTxMu   sync.RWMutex
+
+	// lastProofTxHash stores the TX hash of the last proof submission (for deduplication)
+	lastProofTxHash string
+	lastProofTxMu   sync.RWMutex
 }
 
 // NewHASupplierClient creates a new supplier client for a specific operator.
@@ -645,7 +740,18 @@ func (c *HASupplierClient) CreateClaims(
 		claims[i] = claim
 	}
 
-	return c.txClient.CreateClaims(ctx, c.operatorAddr, claims)
+	// Call TxClient and capture TX hash for deduplication
+	txHash, err := c.txClient.CreateClaims(ctx, c.operatorAddr, timeoutHeight, claims)
+	if err != nil {
+		return err
+	}
+
+	// Store TX hash for retrieval by caller (1 line after broadcast)
+	c.lastClaimTxMu.Lock()
+	c.lastClaimTxHash = txHash
+	c.lastClaimTxMu.Unlock()
+
+	return nil
 }
 
 // SubmitProofs implements client.SupplierClient.
@@ -663,10 +769,37 @@ func (c *HASupplierClient) SubmitProofs(
 		proofs[i] = proof
 	}
 
-	return c.txClient.SubmitProofs(ctx, c.operatorAddr, proofs)
+	// Call TxClient and capture TX hash for deduplication
+	txHash, err := c.txClient.SubmitProofs(ctx, c.operatorAddr, timeoutHeight, proofs)
+	if err != nil {
+		return err
+	}
+
+	// Store TX hash for retrieval by caller (1 line after broadcast)
+	c.lastProofTxMu.Lock()
+	c.lastProofTxHash = txHash
+	c.lastProofTxMu.Unlock()
+
+	return nil
 }
 
 // OperatorAddress implements client.SupplierClient.
 func (c *HASupplierClient) OperatorAddress() string {
 	return c.operatorAddr
+}
+
+// GetLastClaimTxHash returns the TX hash of the last claim submission.
+// This is used for deduplication tracking in Redis.
+func (c *HASupplierClient) GetLastClaimTxHash() string {
+	c.lastClaimTxMu.RLock()
+	defer c.lastClaimTxMu.RUnlock()
+	return c.lastClaimTxHash
+}
+
+// GetLastProofTxHash returns the TX hash of the last proof submission.
+// This is used for deduplication tracking in Redis.
+func (c *HASupplierClient) GetLastProofTxHash() string {
+	c.lastProofTxMu.RLock()
+	defer c.lastProofTxMu.RUnlock()
+	return c.lastProofTxHash
 }

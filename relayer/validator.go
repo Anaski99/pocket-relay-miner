@@ -38,9 +38,6 @@ type ValidatorConfig struct {
 	// AllowedSupplierAddresses is a list of supplier operator addresses
 	// that this relayer is authorized to serve relays for.
 	AllowedSupplierAddresses []string
-
-	// GracePeriodExtraBlocks is additional grace period beyond on-chain config.
-	GracePeriodExtraBlocks int64
 }
 
 // relayValidator implements RelayValidator.
@@ -168,6 +165,11 @@ func (rv *relayValidator) ValidateRelayRequest(
 }
 
 // CheckRewardEligibility checks if a relay is still eligible for rewards.
+// Returns nil if eligible, or an error if the relay is past the acceptance deadline.
+//
+// CRITICAL TIMING: Relays must be rejected 1 block BEFORE grace period ends to allow
+// processing time (validation → Redis publish → miner consume → SMST insert).
+// The grace period is a PROCESSING BUFFER, not extended acceptance time.
 func (rv *relayValidator) CheckRewardEligibility(
 	ctx context.Context,
 	relayRequest *servicetypes.RelayRequest,
@@ -183,16 +185,49 @@ func (rv *relayValidator) CheckRewardEligibility(
 		return fmt.Errorf("failed to get shared params: %w", err)
 	}
 
+	sessionStartHeight := relayRequest.Meta.SessionHeader.GetSessionStartBlockHeight()
 	sessionEndHeight := relayRequest.Meta.SessionHeader.GetSessionEndBlockHeight()
-	claimWindowOpenHeight := sharedtypes.GetClaimWindowOpenHeight(sharedParams, sessionEndHeight)
+	serviceID := relayRequest.Meta.SessionHeader.GetServiceId()
+	applicationAddress := relayRequest.Meta.SessionHeader.GetApplicationAddress()
 
-	// If current height >= claim window open height, relay is no longer eligible
-	if currentHeight >= claimWindowOpenHeight {
+	gracePeriodEndOffset := int64(sharedParams.GetGracePeriodEndOffsetBlocks())
+
+	// CRITICAL: Stop accepting 1 block BEFORE grace period ends to allow processing time
+	// Pipeline: Validate → Redis → Miner → SMST can take 1-2 blocks
+	gracePeriodLastAcceptBlock := sessionEndHeight + gracePeriodEndOffset - 1
+
+	// REJECT: Relay arrived too late (at or after grace period processing buffer)
+	if currentHeight >= gracePeriodLastAcceptBlock {
+		rv.logger.Warn().
+			Str("application", applicationAddress).
+			Str("service_id", serviceID).
+			Int64("session_start", sessionStartHeight).
+			Int64("session_end", sessionEndHeight).
+			Int64("current_height", currentHeight).
+			Int64("grace_period_last_accept", gracePeriodLastAcceptBlock).
+			Int64("blocks_late", currentHeight-gracePeriodLastAcceptBlock).
+			Msg("LATE RELAY REJECTED: Application sent relay too late - relay arrived at/after grace period processing buffer. Relay will be rejected and NOT REWARDED. Application should send relays during session blocks, not grace period.")
+
 		return fmt.Errorf(
-			"session expired, must be before claim window open height (%d), current height is (%d)",
-			claimWindowOpenHeight,
+			"relay too late: session ended at block %d, grace period processing buffer at block %d, current height %d (late by %d blocks) - relay will not be rewarded",
+			sessionEndHeight,
+			gracePeriodLastAcceptBlock,
 			currentHeight,
+			currentHeight-gracePeriodLastAcceptBlock,
 		)
+	}
+
+	// WARN: Relay arrived in last block of session (risky - might not process in time)
+	// This helps identify applications that are cutting it too close
+	if currentHeight == sessionEndHeight {
+		rv.logger.Warn().
+			Str("application", applicationAddress).
+			Str("service_id", serviceID).
+			Int64("session_start", sessionStartHeight).
+			Int64("session_end", sessionEndHeight).
+			Int64("current_height", currentHeight).
+			Int64("grace_period_last_accept", gracePeriodLastAcceptBlock).
+			Msg("RISKY RELAY TIMING: Application sent relay in the LAST BLOCK of session. While accepted, this is risky due to processing latency. Application should send relays earlier in the session to ensure reliable processing.")
 	}
 
 	return nil
@@ -237,18 +272,11 @@ func (rv *relayValidator) getTargetSessionBlockHeight(
 		return 0, fmt.Errorf("failed to get shared params: %w", err)
 	}
 
-	// Add extra grace period blocks if configured
-	effectiveCurrentHeight := currentHeight
-	if rv.config.GracePeriodExtraBlocks > 0 {
-		// Subtract extra grace to be more lenient
-		effectiveCurrentHeight = currentHeight - rv.config.GracePeriodExtraBlocks
-		if effectiveCurrentHeight < sessionEndHeight {
-			effectiveCurrentHeight = sessionEndHeight
-		}
-	}
-
-	// Check if still within grace period
-	if !sharedtypes.IsGracePeriodElapsed(sharedParams, sessionEndHeight, effectiveCurrentHeight) {
+	// Check if still within grace period (using on-chain params only)
+	// NOTE: grace_period_extra_blocks was removed - it created inconsistency between
+	// getTargetSessionBlockHeight() and CheckRewardEligibility() causing relays to be
+	// accepted but marked as ineligible for rewards.
+	if !sharedtypes.IsGracePeriodElapsed(sharedParams, sessionEndHeight, currentHeight) {
 		// Within grace period, use session end height for lookup
 		return sessionEndHeight, nil
 	}

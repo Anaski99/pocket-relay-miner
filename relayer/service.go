@@ -84,8 +84,7 @@ func NewService(config *Config, deps ServiceDependencies) (*Service, error) {
 
 	// Create cache config
 	cacheConfig := cache.CacheConfig{
-		RedisURL:               config.Redis.URL,
-		ExtraGracePeriodBlocks: config.GracePeriodExtraBlocks,
+		RedisURL: config.Redis.URL,
 	}
 
 	// Create shared param cache
@@ -162,7 +161,7 @@ func NewService(config *Config, deps ServiceDependencies) (*Service, error) {
 	var validator RelayValidator
 	if deps.RingClient != nil {
 		validatorConfig := &ValidatorConfig{
-			GracePeriodExtraBlocks: config.GracePeriodExtraBlocks,
+			AllowedSupplierAddresses: []string{}, // Populated by proxy from config
 		}
 		validator = NewRelayValidator(
 			logger,

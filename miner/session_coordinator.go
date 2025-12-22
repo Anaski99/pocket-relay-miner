@@ -175,11 +175,12 @@ func (c *SessionCoordinator) OnSessionCreated(
 }
 
 // OnSessionClaimed should be called when a session's claim is submitted.
-// It updates the session state to claimed and stores the claim root hash.
+// It updates the session state to claimed and stores the claim root hash and TX hash.
 func (c *SessionCoordinator) OnSessionClaimed(
 	ctx context.Context,
 	sessionID string,
 	claimRootHash []byte,
+	claimTxHash string,
 ) error {
 	c.mu.Lock()
 	if c.closed {
@@ -197,8 +198,9 @@ func (c *SessionCoordinator) OnSessionClaimed(
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	// Update with claim root hash
+	// Update with claim root hash and TX hash
 	snapshot.ClaimedRootHash = claimRootHash
+	snapshot.ClaimTxHash = claimTxHash
 	snapshot.State = SessionStateClaimed
 
 	if err := c.sessionStore.Save(ctx, snapshot); err != nil {
@@ -207,8 +209,48 @@ func (c *SessionCoordinator) OnSessionClaimed(
 
 	c.logger.Debug().
 		Str(logging.FieldSessionID, sessionID).
+		Str("claim_tx_hash", claimTxHash).
 		Int("root_hash_len", len(claimRootHash)).
 		Msg("session claimed")
+
+	return nil
+}
+
+// OnSessionProved should be called when a session's proof is submitted.
+// It updates the session state to proving and stores the proof TX hash.
+func (c *SessionCoordinator) OnSessionProved(
+	ctx context.Context,
+	sessionID string,
+	proofTxHash string,
+) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return fmt.Errorf("session coordinator is closed")
+	}
+	c.mu.Unlock()
+
+	// Get current snapshot
+	snapshot, err := c.sessionStore.Get(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to get session snapshot: %w", err)
+	}
+	if snapshot == nil {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	// Update with proof TX hash
+	snapshot.ProofTxHash = proofTxHash
+	snapshot.State = SessionStateProving
+
+	if err := c.sessionStore.Save(ctx, snapshot); err != nil {
+		return fmt.Errorf("failed to save session snapshot: %w", err)
+	}
+
+	c.logger.Debug().
+		Str(logging.FieldSessionID, sessionID).
+		Str("proof_tx_hash", proofTxHash).
+		Msg("session proof submitted")
 
 	return nil
 }
@@ -237,6 +279,39 @@ func (c *SessionCoordinator) OnSessionSettled(
 	c.logger.Debug().
 		Str(logging.FieldSessionID, sessionID).
 		Msg("session settled")
+
+	return nil
+}
+
+// OnSessionExpired should be called when a session expires or fails (e.g., window closed).
+// It updates the session state to expired in Redis immediately for HA compatibility.
+// This ensures that if this miner crashes, a new leader knows the session already failed.
+func (c *SessionCoordinator) OnSessionExpired(
+	ctx context.Context,
+	sessionID string,
+	reason string,
+) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return fmt.Errorf("session coordinator is closed")
+	}
+	c.mu.Unlock()
+
+	// Update state to expired immediately (CRITICAL for HA - don't wait for lifecycle tick)
+	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateExpired); err != nil {
+		c.logger.Warn().
+			Err(err).
+			Str(logging.FieldSessionID, sessionID).
+			Str("reason", reason).
+			Msg("failed to update session state to expired")
+		return err
+	}
+
+	c.logger.Debug().
+		Str(logging.FieldSessionID, sessionID).
+		Str("reason", reason).
+		Msg("session expired")
 
 	return nil
 }

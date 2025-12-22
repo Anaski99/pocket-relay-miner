@@ -3,6 +3,7 @@ package miner
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -404,15 +405,67 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			return nil, fmt.Errorf("failed to wait for claim timing: %w", waitErr)
 		}
 
+		// CRITICAL: Verify claim window is still open AND we have enough time to build+submit
+		// Building claims (SMST flush + headers) takes ~2 blocks, so we need buffer
+		claimWindowClose := sharedtypes.GetClaimWindowCloseHeight(sharedParams, sessionEndHeight)
+		currentBlock := lc.blockClient.LastBlock(ctx)
+		blocksRemaining := claimWindowClose - currentBlock.Height()
+
+		// Require minimum 2 blocks buffer for building claims + TX propagation
+		const minBlocksRequired = 2
+
+		if blocksRemaining < minBlocksRequired {
+			logger.Error().
+				Int64("current_height", currentBlock.Height()).
+				Int64("claim_window_close", claimWindowClose).
+				Int64("blocks_remaining", blocksRemaining).
+				Int64("min_blocks_required", minBlocksRequired).
+				Int64("session_end_height", sessionEndHeight).
+				Int("group_size", len(groupSnapshots)).
+				Msg("insufficient time remaining to build and submit claims - aborting (sessions will be marked as failed)")
+
+			// Mark all sessions in this group as failed (metrics + Redis state for HA)
+			for _, snapshot := range groupSnapshots {
+				RecordSessionFailed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "claim_window_insufficient_time")
+
+				// CRITICAL: Update session state in Redis immediately for HA compatibility
+				// If this miner crashes, the new leader must know this session already failed
+				if lc.sessionCoordinator != nil {
+					if expireErr := lc.sessionCoordinator.OnSessionExpired(ctx, snapshot.SessionID, "claim_window_insufficient_time"); expireErr != nil {
+						logger.Warn().
+							Err(expireErr).
+							Str("session_id", snapshot.SessionID).
+							Msg("failed to mark session as expired in Redis")
+					}
+				}
+			}
+
+			return nil, fmt.Errorf("insufficient time to build claims: %d blocks remaining, %d required (window closes at %d, current: %d)",
+				blocksRemaining, minBlocksRequired, claimWindowClose, currentBlock.Height())
+		}
+
 		logger.Debug().
 			Int("group_size", len(groupSnapshots)).
+			Int64("claim_window_close", claimWindowClose).
+			Int64("current_height", currentBlock.Height()).
+			Int64("blocks_remaining", claimWindowClose-currentBlock.Height()).
 			Msg("claim window timing reached - flushing SMSTs and submitting batched claims")
 
-		// Build all claims for this group
-		var claimMsgs []*prooftypes.MsgCreateClaim
-		var groupRootHashes [][]byte
-
+		// Build all claims for this group (PARALLELIZED for performance)
+		// Pre-filter sessions for validation before parallel processing
+		var validSnapshots []*SessionSnapshot
 		for _, snapshot := range groupSnapshots {
+			// CRITICAL: Deduplication check - never submit the same claim twice
+			// This prevents duplicate claims if we crash and restart between TX broadcast and Redis save
+			if snapshot.ClaimTxHash != "" {
+				logger.Warn().
+					Str(logging.FieldSessionID, snapshot.SessionID).
+					Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
+					Str("existing_claim_tx_hash", snapshot.ClaimTxHash).
+					Msg("skipping claim - already submitted for this session (deduplication)")
+				continue // Skip this session
+			}
+
 			// CRITICAL: Never submit claims with 0 relays or 0 value - waste of fees
 			if snapshot.RelayCount == 0 {
 				logger.Warn().
@@ -462,30 +515,85 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			// Record the scheduled claim height for operators
 			SetClaimScheduledHeight(snapshot.SupplierOperatorAddress, snapshot.SessionID, float64(earliestClaimHeight))
 
-			// Flush the SMST to get the root hash
-			rootHash, flushErr := lc.smstManager.FlushTree(ctx, snapshot.SessionID)
-			if flushErr != nil {
-				return nil, fmt.Errorf("failed to flush SMST for session %s: %w", snapshot.SessionID, flushErr)
-			}
-			groupRootHashes = append(groupRootHashes, rootHash)
-
-			// Build the session header
-			sessionHeader, headerErr := lc.buildSessionHeader(ctx, snapshot)
-			if headerErr != nil {
-				return nil, fmt.Errorf("failed to build session header for %s: %w", snapshot.SessionID, headerErr)
-			}
-
-			// Build claim message
-			claimMsg := &prooftypes.MsgCreateClaim{
-				SupplierOperatorAddress: snapshot.SupplierOperatorAddress,
-				SessionHeader:           sessionHeader,
-				RootHash:                rootHash,
-			}
-			claimMsgs = append(claimMsgs, claimMsg)
+			validSnapshots = append(validSnapshots, snapshot)
 		}
 
-		// Calculate timeout height (claim window close)
-		claimWindowClose := sharedtypes.GetClaimWindowCloseHeight(sharedParams, sessionEndHeight)
+		// PARALLEL CLAIM BUILDING: Flush SMSTs and build claim messages concurrently
+		// Each SMST flush is independent and thread-safe (has its own mutex)
+		// This significantly reduces latency when processing batches of sessions
+		type claimBuildResult struct {
+			index    int
+			snapshot *SessionSnapshot
+			claimMsg *prooftypes.MsgCreateClaim
+			rootHash []byte
+			err      error
+		}
+
+		results := make(chan claimBuildResult, len(validSnapshots))
+		var buildWg sync.WaitGroup
+
+		for i, snapshot := range validSnapshots {
+			buildWg.Add(1)
+			// Capture loop variables for goroutine
+			index := i
+			snap := snapshot
+
+			go func() {
+				defer buildWg.Done()
+
+				result := claimBuildResult{
+					index:    index,
+					snapshot: snap,
+				}
+
+				// Flush the SMST to get the root hash (CPU-bound, can parallelize)
+				rootHash, flushErr := lc.smstManager.FlushTree(ctx, snap.SessionID)
+				if flushErr != nil {
+					result.err = fmt.Errorf("failed to flush SMST for session %s: %w", snap.SessionID, flushErr)
+					results <- result
+					return
+				}
+				result.rootHash = rootHash
+
+				// Build the session header (network I/O, can parallelize)
+				sessionHeader, headerErr := lc.buildSessionHeader(ctx, snap)
+				if headerErr != nil {
+					result.err = fmt.Errorf("failed to build session header for %s: %w", snap.SessionID, headerErr)
+					results <- result
+					return
+				}
+
+				// Build claim message
+				result.claimMsg = &prooftypes.MsgCreateClaim{
+					SupplierOperatorAddress: snap.SupplierOperatorAddress,
+					SessionHeader:           sessionHeader,
+					RootHash:                rootHash,
+				}
+
+				results <- result
+			}()
+		}
+
+		// Wait for all parallel builds to complete
+		buildWg.Wait()
+		close(results)
+
+		// Collect results in original order
+		claimResults := make([]claimBuildResult, len(validSnapshots))
+		for result := range results {
+			if result.err != nil {
+				return nil, result.err
+			}
+			claimResults[result.index] = result
+		}
+
+		// Extract messages and root hashes in order
+		var claimMsgs []*prooftypes.MsgCreateClaim
+		var groupRootHashes [][]byte
+		for _, result := range claimResults {
+			claimMsgs = append(claimMsgs, result.claimMsg)
+			groupRootHashes = append(groupRootHashes, result.rootHash)
+		}
 
 		// Convert to interface types for variadic call
 		interfaceClaimMsgs := make([]pocktclient.MsgCreateClaim, len(claimMsgs))
@@ -493,11 +601,78 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			interfaceClaimMsgs[i] = msg
 		}
 
+		// CRITICAL: Re-check window is still open RIGHT before submission
+		// Building claims (SMST flush, headers) takes time - blocks may have advanced!
+		currentBlock = lc.blockClient.LastBlock(ctx)
+		if currentBlock.Height() >= claimWindowClose {
+			logger.Error().
+				Int64("current_height", currentBlock.Height()).
+				Int64("claim_window_close", claimWindowClose).
+				Int64("session_end_height", sessionEndHeight).
+				Int("batch_size", len(claimMsgs)).
+				Msg("claim window closed while building claims - cannot submit (sessions will be marked as failed)")
+
+			// Mark all sessions in this batch as failed (metrics + Redis state for HA)
+			for _, snapshot := range groupSnapshots {
+				RecordSessionFailed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "claim_window_closed")
+
+				// CRITICAL: Update session state in Redis immediately for HA compatibility
+				if lc.sessionCoordinator != nil {
+					if expireErr := lc.sessionCoordinator.OnSessionExpired(ctx, snapshot.SessionID, "claim_window_closed"); expireErr != nil {
+						logger.Warn().
+							Err(expireErr).
+							Str("session_id", snapshot.SessionID).
+							Msg("failed to mark session as expired in Redis")
+					}
+				}
+			}
+
+			return nil, fmt.Errorf("claim window closed while building claims at height %d (current: %d)", claimWindowClose, currentBlock.Height())
+		}
+
+		logger.Debug().
+			Int64("current_height", currentBlock.Height()).
+			Int64("claim_window_close", claimWindowClose).
+			Int64("blocks_remaining", claimWindowClose-currentBlock.Height()).
+			Int("batch_size", len(claimMsgs)).
+			Msg("final window check passed - submitting claims")
+
 		// Submit all claims in a single transaction with retries
 		var lastErr error
+		var claimTxHash string
 		for attempt := 1; attempt <= lc.config.ClaimRetryAttempts; attempt++ {
-			if submitErr := lc.supplierClient.CreateClaims(ctx, claimWindowClose, interfaceClaimMsgs...); submitErr != nil {
+			submitErr := lc.supplierClient.CreateClaims(ctx, claimWindowClose, interfaceClaimMsgs...)
+			if submitErr != nil {
 				lastErr = submitErr
+
+				// Check if error is due to claim window being closed (permanent failure - don't retry)
+				errorMsg := submitErr.Error()
+				if strings.Contains(errorMsg, "claim window") || strings.Contains(errorMsg, "claim_window") {
+					logger.Error().
+						Err(submitErr).
+						Int64("current_height", lc.blockClient.LastBlock(ctx).Height()).
+						Int64("claim_window_close", claimWindowClose).
+						Int("batch_size", len(claimMsgs)).
+						Msg("claim window closed during submission - permanent failure, not retrying")
+
+					// Mark all sessions in this batch as failed (metrics + Redis state for HA)
+					for _, snapshot := range groupSnapshots {
+						RecordSessionFailed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "claim_window_closed")
+
+						// CRITICAL: Update session state in Redis immediately for HA compatibility
+						if lc.sessionCoordinator != nil {
+							if expireErr := lc.sessionCoordinator.OnSessionExpired(ctx, snapshot.SessionID, "claim_window_closed"); expireErr != nil {
+								logger.Warn().
+									Err(expireErr).
+									Str("session_id", snapshot.SessionID).
+									Msg("failed to mark session as expired in Redis")
+							}
+						}
+					}
+
+					break // Don't retry - this is a permanent failure
+				}
+
 				logger.Warn().
 					Err(submitErr).
 					Int(logging.FieldAttempt, attempt).
@@ -514,25 +689,35 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					}
 				}
 			} else {
-				// Success
+				// SUCCESS: Claim TX broadcast accepted to mempool
+				// Retrieve TX hash from HA client (stored immediately after broadcast)
+				if haClient, ok := lc.supplierClient.(*tx.HASupplierClient); ok {
+					claimTxHash = haClient.GetLastClaimTxHash()
+				}
+
 				currentBlock := lc.blockClient.LastBlock(ctx)
 				blocksAfterWindowOpen := float64(currentBlock.Height() - claimWindowOpenHeight)
 
-				// Record metrics for all sessions in the batch
-				for i, snapshot := range groupSnapshots {
-					RecordClaimSubmitted(snapshot.SupplierOperatorAddress)
-					RecordClaimSubmissionLatency(snapshot.SupplierOperatorAddress, blocksAfterWindowOpen)
-					RecordRevenueClaimed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
-
-					// Update snapshot manager
+				// CRITICAL: Save TX hash to Redis IMMEDIATELY (1 line after broadcast)
+				// This prevents duplicate submissions if we crash after TX broadcast
+				for i, snapshot := range validSnapshots {
+					// Update snapshot manager with TX hash for deduplication
 					if lc.sessionCoordinator != nil {
-						if updateErr := lc.sessionCoordinator.OnSessionClaimed(ctx, snapshot.SessionID, groupRootHashes[i]); updateErr != nil {
+						if updateErr := lc.sessionCoordinator.OnSessionClaimed(ctx, snapshot.SessionID, groupRootHashes[i], claimTxHash); updateErr != nil {
 							logger.Warn().
 								Err(updateErr).
 								Str("session_id", snapshot.SessionID).
+								Str("claim_tx_hash", claimTxHash).
 								Msg("failed to update snapshot after claim")
 						}
 					}
+				}
+
+				// Record metrics for all sessions in the batch
+				for i, snapshot := range validSnapshots {
+					RecordClaimSubmitted(snapshot.SupplierOperatorAddress)
+					RecordClaimSubmissionLatency(snapshot.SupplierOperatorAddress, blocksAfterWindowOpen)
+					RecordRevenueClaimed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
 
 					// Copy root hash to result (maintain order)
 					allRootHashes[sessionIndex] = groupRootHashes[i]
@@ -541,6 +726,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 
 				logger.Info().
 					Int("batch_size", len(claimMsgs)).
+					Str("claim_tx_hash", claimTxHash).
 					Int64("blocks_after_window", int64(blocksAfterWindowOpen)).
 					Msg("batched claims submitted successfully")
 
@@ -572,6 +758,15 @@ func (lc *LifecycleCallback) OnSessionNeedsClaim(ctx context.Context, snapshot *
 	logger.Debug().
 		Int64(logging.FieldCount, snapshot.RelayCount).
 		Msg("session needs claim - starting claim process")
+
+	// CRITICAL: Deduplication check - never submit the same claim twice
+	if snapshot.ClaimTxHash != "" {
+		logger.Warn().
+			Str(logging.FieldSessionID, snapshot.SessionID).
+			Str("existing_claim_tx_hash", snapshot.ClaimTxHash).
+			Msg("skipping claim - already submitted for this session (deduplication)")
+		return nil, fmt.Errorf("claim already submitted for session %s (tx_hash: %s)", snapshot.SessionID, snapshot.ClaimTxHash)
+	}
 
 	// Get shared params
 	sharedParams, err := lc.sharedClient.GetParams(ctx)
@@ -638,7 +833,8 @@ func (lc *LifecycleCallback) OnSessionNeedsClaim(ctx context.Context, snapshot *
 
 	var lastErr error
 	for attempt := 1; attempt <= lc.config.ClaimRetryAttempts; attempt++ {
-		if err := lc.supplierClient.CreateClaims(ctx, claimWindowClose, claimMsg); err != nil {
+		err := lc.supplierClient.CreateClaims(ctx, claimWindowClose, claimMsg)
+		if err != nil {
 			lastErr = err
 			logger.Warn().
 				Err(err).
@@ -655,9 +851,26 @@ func (lc *LifecycleCallback) OnSessionNeedsClaim(ctx context.Context, snapshot *
 				}
 			}
 		} else {
-			// Success
+			// SUCCESS: Claim TX broadcast accepted to mempool
+			// Retrieve TX hash from HA client (stored immediately after broadcast)
+			var txHash string
+			if haClient, ok := lc.supplierClient.(*tx.HASupplierClient); ok {
+				txHash = haClient.GetLastClaimTxHash()
+			}
+
 			currentBlock := lc.blockClient.LastBlock(ctx)
 			blocksAfterWindowOpen := float64(currentBlock.Height() - claimWindowOpenHeight)
+
+			// CRITICAL: Save TX hash to Redis IMMEDIATELY (1 line after broadcast)
+			// This prevents duplicate submissions if we crash after TX broadcast
+			if lc.sessionCoordinator != nil {
+				if updateErr := lc.sessionCoordinator.OnSessionClaimed(ctx, snapshot.SessionID, rootHash, txHash); updateErr != nil {
+					logger.Warn().
+						Err(updateErr).
+						Str("claim_tx_hash", txHash).
+						Msg("failed to update snapshot after claim")
+				}
+			}
 
 			RecordClaimSubmitted(snapshot.SupplierOperatorAddress)
 			RecordClaimSubmissionLatency(snapshot.SupplierOperatorAddress, blocksAfterWindowOpen)
@@ -665,15 +878,9 @@ func (lc *LifecycleCallback) OnSessionNeedsClaim(ctx context.Context, snapshot *
 
 			logger.Info().
 				Int("root_hash_len", len(rootHash)).
+				Str("claim_tx_hash", txHash).
 				Int64("blocks_after_window", int64(blocksAfterWindowOpen)).
 				Msg("claim submitted successfully")
-
-			// Update snapshot manager
-			if lc.sessionCoordinator != nil {
-				if updateErr := lc.sessionCoordinator.OnSessionClaimed(ctx, snapshot.SessionID, rootHash); updateErr != nil {
-					logger.Warn().Err(updateErr).Msg("failed to update snapshot after claim")
-				}
-			}
 
 			return rootHash, nil
 		}
@@ -730,6 +937,15 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		// Filter sessions based on proof requirement (probabilistic proof selection)
 		var sessionsNeedingProof []*SessionSnapshot
 		for _, snapshot := range groupSnapshots {
+			// CRITICAL: Deduplication check - never submit the same proof twice
+			if snapshot.ProofTxHash != "" {
+				logger.Warn().
+					Str("session_id", snapshot.SessionID).
+					Str("existing_proof_tx_hash", snapshot.ProofTxHash).
+					Msg("skipping proof - already submitted for this session (deduplication)")
+				continue // Skip this session
+			}
+
 			if lc.proofChecker != nil {
 				required, checkErr := lc.proofChecker.IsProofRequired(ctx, snapshot, proofWindowOpenBlock.Hash())
 				if checkErr != nil {
@@ -786,43 +1002,123 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			return fmt.Errorf("failed to wait for proof path seed block: %w", seedErr)
 		}
 
-		logger.Debug().
-			Int("group_size", len(sessionsNeedingProof)).
-			Msg("proof window timing reached - generating and submitting batched proofs")
+		// CRITICAL: Verify proof window is still open before proceeding
+		// This prevents wasting fees on proofs that will be rejected
+		proofWindowClose := sharedtypes.GetProofWindowCloseHeight(sharedParams, sessionEndHeight)
+		currentBlock := lc.blockClient.LastBlock(ctx)
+		if currentBlock.Height() >= proofWindowClose {
+			logger.Error().
+				Int64("current_height", currentBlock.Height()).
+				Int64("proof_window_close", proofWindowClose).
+				Int64("session_end_height", sessionEndHeight).
+				Int("group_size", len(sessionsNeedingProof)).
+				Msg("proof window already closed - cannot submit proofs (sessions will be marked as failed)")
 
-		// Build all proofs for this group
-		var proofMsgs []*prooftypes.MsgSubmitProof
+			// Mark all sessions in this group as failed (metrics + Redis state for HA)
+			for _, snapshot := range sessionsNeedingProof {
+				RecordProofError(snapshot.SupplierOperatorAddress, "proof_window_closed")
+				RecordRevenueLost(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "proof_window_closed", snapshot.TotalComputeUnits, snapshot.RelayCount)
 
-		for _, snapshot := range sessionsNeedingProof {
-			// Record the scheduled proof height for operators
-			SetProofScheduledHeight(snapshot.SupplierOperatorAddress, snapshot.SessionID, float64(earliestProofHeight))
-
-			// Generate the proof path from the seed block hash
-			path := protocol.GetPathForProof(proofPathSeedBlock.Hash(), snapshot.SessionID)
-
-			// Generate the proof
-			proofBytes, proofErr := lc.smstManager.ProveClosest(ctx, snapshot.SessionID, path)
-			if proofErr != nil {
-				return fmt.Errorf("failed to generate proof for session %s: %w", snapshot.SessionID, proofErr)
+				// CRITICAL: Update session state in Redis immediately for HA compatibility
+				// If this miner crashes, the new leader must know this session already failed
+				if lc.sessionCoordinator != nil {
+					if expireErr := lc.sessionCoordinator.OnSessionExpired(ctx, snapshot.SessionID, "proof_window_closed"); expireErr != nil {
+						logger.Warn().
+							Err(expireErr).
+							Str("session_id", snapshot.SessionID).
+							Msg("failed to mark session as expired in Redis")
+					}
+				}
 			}
 
-			// Build the session header
-			sessionHeader, headerErr := lc.buildSessionHeader(ctx, snapshot)
-			if headerErr != nil {
-				return fmt.Errorf("failed to build session header for %s: %w", snapshot.SessionID, headerErr)
-			}
-
-			// Build proof message
-			proofMsg := &prooftypes.MsgSubmitProof{
-				SupplierOperatorAddress: snapshot.SupplierOperatorAddress,
-				SessionHeader:           sessionHeader,
-				Proof:                   proofBytes,
-			}
-			proofMsgs = append(proofMsgs, proofMsg)
+			return fmt.Errorf("proof window already closed at height %d (current: %d)", proofWindowClose, currentBlock.Height())
 		}
 
-		// Calculate timeout height (proof window close)
-		proofWindowClose := sharedtypes.GetProofWindowCloseHeight(sharedParams, sessionEndHeight)
+		logger.Debug().
+			Int("group_size", len(sessionsNeedingProof)).
+			Int64("proof_window_close", proofWindowClose).
+			Int64("current_height", currentBlock.Height()).
+			Int64("blocks_remaining", proofWindowClose-currentBlock.Height()).
+			Msg("proof window timing reached - generating and submitting batched proofs")
+
+		// PARALLEL PROOF BUILDING: Generate proofs and build messages concurrently
+		// Each proof generation is independent and thread-safe
+		// This significantly reduces latency when processing batches of sessions
+		type proofBuildResult struct {
+			index    int
+			snapshot *SessionSnapshot
+			proofMsg *prooftypes.MsgSubmitProof
+			err      error
+		}
+
+		proofResults := make(chan proofBuildResult, len(sessionsNeedingProof))
+		var proofBuildWg sync.WaitGroup
+
+		for i, snapshot := range sessionsNeedingProof {
+			proofBuildWg.Add(1)
+			// Capture loop variables for goroutine
+			index := i
+			snap := snapshot
+
+			go func() {
+				defer proofBuildWg.Done()
+
+				result := proofBuildResult{
+					index:    index,
+					snapshot: snap,
+				}
+
+				// Record the scheduled proof height for operators
+				SetProofScheduledHeight(snap.SupplierOperatorAddress, snap.SessionID, float64(earliestProofHeight))
+
+				// Generate the proof path from the seed block hash
+				path := protocol.GetPathForProof(proofPathSeedBlock.Hash(), snap.SessionID)
+
+				// Generate the proof (CPU-bound cryptographic operation, can parallelize)
+				proofBytes, proofErr := lc.smstManager.ProveClosest(ctx, snap.SessionID, path)
+				if proofErr != nil {
+					result.err = fmt.Errorf("failed to generate proof for session %s: %w", snap.SessionID, proofErr)
+					proofResults <- result
+					return
+				}
+
+				// Build the session header (network I/O, can parallelize)
+				sessionHeader, headerErr := lc.buildSessionHeader(ctx, snap)
+				if headerErr != nil {
+					result.err = fmt.Errorf("failed to build session header for %s: %w", snap.SessionID, headerErr)
+					proofResults <- result
+					return
+				}
+
+				// Build proof message
+				result.proofMsg = &prooftypes.MsgSubmitProof{
+					SupplierOperatorAddress: snap.SupplierOperatorAddress,
+					SessionHeader:           sessionHeader,
+					Proof:                   proofBytes,
+				}
+
+				proofResults <- result
+			}()
+		}
+
+		// Wait for all parallel builds to complete
+		proofBuildWg.Wait()
+		close(proofResults)
+
+		// Collect results in original order
+		proofBuildResults := make([]proofBuildResult, len(sessionsNeedingProof))
+		for result := range proofResults {
+			if result.err != nil {
+				return result.err
+			}
+			proofBuildResults[result.index] = result
+		}
+
+		// Extract messages in order
+		var proofMsgs []*prooftypes.MsgSubmitProof
+		for _, result := range proofBuildResults {
+			proofMsgs = append(proofMsgs, result.proofMsg)
+		}
 
 		// Convert to interface types for variadic call
 		interfaceProofMsgs := make([]pocktclient.MsgSubmitProof, len(proofMsgs))
@@ -830,11 +1126,80 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			interfaceProofMsgs[i] = msg
 		}
 
+		// CRITICAL: Re-check window is still open RIGHT before submission
+		// Building proofs (proof generation, headers) takes time - blocks may have advanced!
+		currentBlock = lc.blockClient.LastBlock(ctx)
+		if currentBlock.Height() >= proofWindowClose {
+			logger.Error().
+				Int64("current_height", currentBlock.Height()).
+				Int64("proof_window_close", proofWindowClose).
+				Int64("session_end_height", sessionEndHeight).
+				Int("batch_size", len(proofMsgs)).
+				Msg("proof window closed while building proofs - cannot submit (sessions will be marked as failed)")
+
+			// Mark all sessions in this batch as failed (metrics + Redis state for HA)
+			for _, snapshot := range sessionsNeedingProof {
+				RecordProofError(snapshot.SupplierOperatorAddress, "proof_window_closed")
+				RecordRevenueLost(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "proof_window_closed", snapshot.TotalComputeUnits, snapshot.RelayCount)
+
+				// CRITICAL: Update session state in Redis immediately for HA compatibility
+				if lc.sessionCoordinator != nil {
+					if expireErr := lc.sessionCoordinator.OnSessionExpired(ctx, snapshot.SessionID, "proof_window_closed"); expireErr != nil {
+						logger.Warn().
+							Err(expireErr).
+							Str("session_id", snapshot.SessionID).
+							Msg("failed to mark session as expired in Redis")
+					}
+				}
+			}
+
+			return fmt.Errorf("proof window closed while building proofs at height %d (current: %d)", proofWindowClose, currentBlock.Height())
+		}
+
+		logger.Debug().
+			Int64("current_height", currentBlock.Height()).
+			Int64("proof_window_close", proofWindowClose).
+			Int64("blocks_remaining", proofWindowClose-currentBlock.Height()).
+			Int("batch_size", len(proofMsgs)).
+			Msg("final window check passed - submitting proofs")
+
 		// Submit all proofs in a single transaction with retries
 		var lastErr error
+		var proofTxHash string
 		for attempt := 1; attempt <= lc.config.ProofRetryAttempts; attempt++ {
-			if submitErr := lc.supplierClient.SubmitProofs(ctx, proofWindowClose, interfaceProofMsgs...); submitErr != nil {
+			submitErr := lc.supplierClient.SubmitProofs(ctx, proofWindowClose, interfaceProofMsgs...)
+			if submitErr != nil {
 				lastErr = submitErr
+
+				// Check if error is due to proof window being closed (permanent failure - don't retry)
+				errorMsg := submitErr.Error()
+				if strings.Contains(errorMsg, "proof window") || strings.Contains(errorMsg, "proof_window") {
+					logger.Error().
+						Err(submitErr).
+						Int64("current_height", lc.blockClient.LastBlock(ctx).Height()).
+						Int64("proof_window_close", proofWindowClose).
+						Int("batch_size", len(proofMsgs)).
+						Msg("proof window closed during submission - permanent failure, not retrying")
+
+					// Mark all sessions in this batch as failed (metrics + Redis state for HA)
+					for _, snapshot := range sessionsNeedingProof {
+						RecordProofError(snapshot.SupplierOperatorAddress, "proof_window_closed")
+						RecordRevenueLost(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "proof_window_closed", snapshot.TotalComputeUnits, snapshot.RelayCount)
+
+						// CRITICAL: Update session state in Redis immediately for HA compatibility
+						if lc.sessionCoordinator != nil {
+							if expireErr := lc.sessionCoordinator.OnSessionExpired(ctx, snapshot.SessionID, "proof_window_closed"); expireErr != nil {
+								logger.Warn().
+									Err(expireErr).
+									Str("session_id", snapshot.SessionID).
+									Msg("failed to mark session as expired in Redis")
+							}
+						}
+					}
+
+					break // Don't retry - this is a permanent failure
+				}
+
 				logger.Warn().
 					Err(submitErr).
 					Int(logging.FieldAttempt, attempt).
@@ -851,9 +1216,28 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					}
 				}
 			} else {
-				// Success
+				// SUCCESS: Proof TX broadcast accepted to mempool
+				// Retrieve TX hash from HA client (stored immediately after broadcast)
+				if haClient, ok := lc.supplierClient.(*tx.HASupplierClient); ok {
+					proofTxHash = haClient.GetLastProofTxHash()
+				}
+
 				currentBlock := lc.blockClient.LastBlock(ctx)
 				blocksAfterWindowOpen := float64(currentBlock.Height() - proofWindowOpenHeight)
+
+				// CRITICAL: Save TX hash to Redis IMMEDIATELY (1 line after broadcast)
+				// This prevents duplicate submissions if we crash after TX broadcast
+				for _, snapshot := range sessionsNeedingProof {
+					if lc.sessionCoordinator != nil {
+						if updateErr := lc.sessionCoordinator.OnSessionProved(ctx, snapshot.SessionID, proofTxHash); updateErr != nil {
+							logger.Warn().
+								Err(updateErr).
+								Str("session_id", snapshot.SessionID).
+								Str("proof_tx_hash", proofTxHash).
+								Msg("failed to update snapshot after proof")
+						}
+					}
+				}
 
 				// Record metrics for all sessions in the batch
 				for _, snapshot := range sessionsNeedingProof {
@@ -864,6 +1248,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 
 				logger.Info().
 					Int("batch_size", len(proofMsgs)).
+					Str("proof_tx_hash", proofTxHash).
 					Int64("blocks_after_window", int64(blocksAfterWindowOpen)).
 					Msg("batched proofs submitted successfully")
 
@@ -893,6 +1278,15 @@ func (lc *LifecycleCallback) OnSessionNeedsProof(ctx context.Context, snapshot *
 	logger := lc.logger.With().Str(logging.FieldSessionID, snapshot.SessionID).Int64(logging.FieldSessionEndHeight, snapshot.SessionEndHeight).Logger()
 
 	logger.Debug().Msg("session needs proof - starting proof process")
+
+	// CRITICAL: Deduplication check - never submit the same proof twice
+	if snapshot.ProofTxHash != "" {
+		logger.Warn().
+			Str(logging.FieldSessionID, snapshot.SessionID).
+			Str("existing_proof_tx_hash", snapshot.ProofTxHash).
+			Msg("skipping proof - already submitted for this session (deduplication)")
+		return fmt.Errorf("proof already submitted for session %s (tx_hash: %s)", snapshot.SessionID, snapshot.ProofTxHash)
+	}
 
 	// Get shared params
 	sharedParams, err := lc.sharedClient.GetParams(ctx)
@@ -989,7 +1383,8 @@ func (lc *LifecycleCallback) OnSessionNeedsProof(ctx context.Context, snapshot *
 
 	var lastErr error
 	for attempt := 1; attempt <= lc.config.ProofRetryAttempts; attempt++ {
-		if err := lc.supplierClient.SubmitProofs(ctx, proofWindowClose, proofMsg); err != nil {
+		err := lc.supplierClient.SubmitProofs(ctx, proofWindowClose, proofMsg)
+		if err != nil {
 			lastErr = err
 			logger.Warn().
 				Err(err).
@@ -1006,9 +1401,26 @@ func (lc *LifecycleCallback) OnSessionNeedsProof(ctx context.Context, snapshot *
 				}
 			}
 		} else {
-			// Success
+			// SUCCESS: Proof TX broadcast accepted to mempool
+			// Retrieve TX hash from HA client (stored immediately after broadcast)
+			var txHash string
+			if haClient, ok := lc.supplierClient.(*tx.HASupplierClient); ok {
+				txHash = haClient.GetLastProofTxHash()
+			}
+
 			currentBlock := lc.blockClient.LastBlock(ctx)
 			blocksAfterWindowOpen := float64(currentBlock.Height() - proofWindowOpenHeight)
+
+			// CRITICAL: Save TX hash to Redis IMMEDIATELY (1 line after broadcast)
+			// This prevents duplicate submissions if we crash after TX broadcast
+			if lc.sessionCoordinator != nil {
+				if updateErr := lc.sessionCoordinator.OnSessionProved(ctx, snapshot.SessionID, txHash); updateErr != nil {
+					logger.Warn().
+						Err(updateErr).
+						Str("proof_tx_hash", txHash).
+						Msg("failed to update snapshot after proof")
+				}
+			}
 
 			RecordProofSubmitted(snapshot.SupplierOperatorAddress)
 			RecordProofSubmissionLatency(snapshot.SupplierOperatorAddress, blocksAfterWindowOpen)
@@ -1016,6 +1428,7 @@ func (lc *LifecycleCallback) OnSessionNeedsProof(ctx context.Context, snapshot *
 
 			logger.Info().
 				Int("proof_len", len(proofBytes)).
+				Str("proof_tx_hash", txHash).
 				Int64("blocks_after_window", int64(blocksAfterWindowOpen)).
 				Msg("proof submitted successfully")
 

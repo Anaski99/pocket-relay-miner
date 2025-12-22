@@ -599,11 +599,6 @@ func (c *SupplierClaimer) renewAllClaims() {
 			c.claimedMu.Unlock()
 			// Try to reclaim
 			c.TryClaim(c.ctx, supplier)
-		} else {
-			c.logger.Debug().
-				Str("supplier", supplier).
-				Dur("ttl", c.config.ClaimTTL).
-				Msg("renewed claim")
 		}
 	}
 }

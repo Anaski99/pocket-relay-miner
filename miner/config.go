@@ -23,6 +23,9 @@ type Config struct {
 	// Keys configuration for loading supplier signing keys.
 	Keys config.KeysConfig `yaml:"keys"`
 
+	// Transaction configuration for claim/proof submission.
+	Transaction TransactionConfig `yaml:"transaction,omitempty"`
+
 	// Metrics configuration.
 	Metrics config.MetricsConfig `yaml:"metrics"`
 
@@ -97,20 +100,6 @@ type Config struct {
 
 // SessionLifecycleConfigYAML contains configuration for session lifecycle management.
 type SessionLifecycleConfigYAML struct {
-	// WindowStartBufferBlocks is blocks after a window open to wait before the earliest submission.
-	// This spreads out supplier submissions more evenly across the window.
-	// Default: 10
-	WindowStartBufferBlocks int64 `yaml:"window_start_buffer_blocks,omitempty"`
-
-	// ClaimSubmissionBuffer is blocks before claim window close to start claiming.
-	// This provides buffer time for transaction confirmation.
-	// Default: 2
-	ClaimSubmissionBuffer int64 `yaml:"claim_submission_buffer,omitempty"`
-
-	// ProofSubmissionBuffer is blocks before a proof window close to start proving.
-	// Default: 2
-	ProofSubmissionBuffer int64 `yaml:"proof_submission_buffer,omitempty"`
-
 	// MaxConcurrentTransitions is the max number of sessions transitioning at once.
 	// Default: 10
 	MaxConcurrentTransitions int `yaml:"max_concurrent_transitions,omitempty"`
@@ -194,6 +183,26 @@ type RedisConfig struct {
 // DEPRECATED: This type is no longer used in production code.
 // Suppliers are auto-discovered from keys configuration.
 // Kept only for legacy test compatibility.
+// TransactionConfig contains configuration for claim/proof transaction submission.
+type TransactionConfig struct {
+	// GasLimit is the gas limit for transactions.
+	// Set to 0 for automatic gas estimation (simulation).
+	// Set to a positive value for a fixed gas limit.
+	// When set to 0, gas is estimated via simulation and multiplied by GasAdjustment.
+	// Default: 0 (automatic estimation)
+	GasLimit uint64 `yaml:"gas_limit,omitempty"`
+
+	// GasPrice is the gas price per unit (e.g., "0.00001upokt").
+	// Default: "0.00001upokt"
+	GasPrice string `yaml:"gas_price,omitempty"`
+
+	// GasAdjustment is the multiplier applied to simulated gas to add safety margin.
+	// Only used when GasLimit=0 (automatic gas estimation).
+	// Example: 1.7 means add 70% safety margin above simulated gas.
+	// Default: 1.7
+	GasAdjustment float64 `yaml:"gas_adjustment,omitempty"`
+}
+
 type SupplierConfig struct {
 	// OperatorAddress is the supplier's operator address (bech32).
 	OperatorAddress string `yaml:"operator_address"`
@@ -291,6 +300,30 @@ func (c *Config) GetAckBatchSize() int64 {
 	return 50 // Default
 }
 
+// GetTxGasLimit returns the transaction gas limit with defaults.
+// Returns 0 for automatic gas estimation (simulation).
+func (c *Config) GetTxGasLimit() uint64 {
+	// Note: GasLimit defaults to 0 if not set, which means auto/simulation mode
+	return c.Transaction.GasLimit
+}
+
+// GetTxGasPrice returns the transaction gas price with defaults.
+func (c *Config) GetTxGasPrice() string {
+	if c.Transaction.GasPrice != "" {
+		return c.Transaction.GasPrice
+	}
+	return "0.00001upokt" // Default: 0.00001 upokt (10x higher than previous default)
+}
+
+// GetTxGasAdjustment returns the gas adjustment multiplier with defaults.
+// Only used when GasLimit=0 (automatic gas estimation).
+func (c *Config) GetTxGasAdjustment() float64 {
+	if c.Transaction.GasAdjustment > 0 {
+		return c.Transaction.GasAdjustment
+	}
+	return 1.7 // Default: 1.7 (adds 70% safety margin to simulated gas)
+}
+
 // GetDeduplicationTTL returns the deduplication TTL in blocks.
 func (c *Config) GetDeduplicationTTL() int64 {
 	if c.DeduplicationTTLBlocks > 0 {
@@ -313,34 +346,6 @@ func (c *Config) GetLeaderHeartbeatRate() time.Duration {
 		return time.Duration(c.LeaderElection.HeartbeatRateSeconds) * time.Second
 	}
 	return 10 * time.Second // Default
-}
-
-// GetSessionLifecycleWindowStartBuffer returns the window start buffer in blocks.
-// TODO: This is not yet wired up in production code.
-// The SubmissionTimingCalculator (miner/submission_timing.go) uses WindowStartBufferBlocks,
-// but it's only instantiated in tests. Wire this config value through when the timing
-// calculator is integrated into the session lifecycle manager.
-func (c *Config) GetSessionLifecycleWindowStartBuffer() int64 {
-	if c.SessionLifecycle.WindowStartBufferBlocks > 0 {
-		return c.SessionLifecycle.WindowStartBufferBlocks
-	}
-	return 10 // Default
-}
-
-// GetSessionLifecycleClaimBuffer returns the claim submission buffer in blocks.
-func (c *Config) GetSessionLifecycleClaimBuffer() int64 {
-	if c.SessionLifecycle.ClaimSubmissionBuffer > 0 {
-		return c.SessionLifecycle.ClaimSubmissionBuffer
-	}
-	return 2 // Default
-}
-
-// GetSessionLifecycleProofBuffer returns the proof submission buffer in blocks.
-func (c *Config) GetSessionLifecycleProofBuffer() int64 {
-	if c.SessionLifecycle.ProofSubmissionBuffer > 0 {
-		return c.SessionLifecycle.ProofSubmissionBuffer
-	}
-	return 2 // Default
 }
 
 // GetSessionLifecycleMaxConcurrentTransitions returns the max concurrent transitions.

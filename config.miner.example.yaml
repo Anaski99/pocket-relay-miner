@@ -76,6 +76,32 @@ pocket_node:
   query_timeout_seconds: 5  # Timeout for blockchain queries (default: 5s)
 
 # ==============================================================================
+# Transaction Configuration (Claim/Proof Submission)
+# ==============================================================================
+# transaction:
+  # Gas limit for transactions
+  # Set to 0 for automatic gas estimation (simulation) - RECOMMENDED for production
+  # Set to a positive value for a fixed gas limit
+  # Default: 0 (automatic estimation via simulation)
+  # gas_limit: 0
+
+  # Gas price in upokt (1 POKT = 1,000,000 upokt)
+  # Default: "0.00001upokt"
+  # gas_price: "0.00001upokt"
+
+  # Gas adjustment factor (multiplier applied to simulated gas)
+  # Only used when gas_limit=0 (automatic gas estimation via simulation)
+  # Adds safety margin: actual_gas = simulated_gas * gas_adjustment
+  # Default: 1.7 (adds 70% safety margin to simulated gas)
+  # Increase if transactions fail with code 11 (out of gas) despite simulation
+  gas_adjustment: 1.7
+
+  # NOTE: Unordered transactions with SYNC broadcast mode
+  # We use unordered=true with 2-minute timeout_timestamp to eliminate account
+  # sequence mismatch errors. SYNC mode returns immediately after CheckTx (mempool
+  # acceptance) without waiting for block inclusion, so no commit polling is needed.
+
+# ==============================================================================
 # Supplier Keys Configuration (REQUIRED)
 # ==============================================================================
 keys:
@@ -152,27 +178,16 @@ balance_monitor:
   stake_critical_proof_threshold: 3    # Critical when < 3 missed proofs remaining
 
 # ==============================================================================
-# Session Lifecycle Configuration (Features 2, 3, 5)
+# Session Lifecycle Configuration
 # ==============================================================================
-# NOTE: Session lifecycle is now event-driven (uses block events instead of polling)
+# NOTE: Session lifecycle is event-driven (uses block events instead of polling)
+# NOTE: Submission timing is handled by the protocol's built-in deterministic spreading
+#       via GetEarliestSupplierClaimCommitHeight() - no manual buffers needed.
 session_lifecycle:
-  # Spread buffer configuration (Feature 2: Spread Buffers)
-  # Controls when submissions occur within claim/proof windows
-  window_start_buffer_blocks: 10  # Delay after window opens (avoids network congestion)
-  claim_submission_buffer: 2  # Blocks before claim window close
-  proof_submission_buffer: 2  # Blocks before proof window close
+  # Concurrent transitions (claim/proof building is parallelized for performance)
+  max_concurrent_transitions: 10  # Limit parallel claim/proof submission batches
 
-  # Example with 100-block claim window:
-  #   Window: [height 1000, height 1100]
-  #   Earliest submit: 1000 + 10 = 1010
-  #   Safe deadline: 1100 - 2 = 1098
-  #   Available spread range: [1010, 1098] = 88 blocks
-  #   → Submissions pseudo-randomly distributed across 88 blocks
-
-  # Concurrent transitions
-  max_concurrent_transitions: 10  # Limit parallel claim/proof submissions
-
-  # Stream discovery (Feature 5: Session-Based Streams)
+  # Stream discovery
   stream_discovery_interval_seconds: 10  # SCAN Redis for new session streams every 10s
 
 # ==============================================================================

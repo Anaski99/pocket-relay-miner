@@ -365,7 +365,7 @@ func (p *ProxyServer) Start(ctx context.Context) error {
 	p.sessionMonitor = NewSessionMonitor(
 		p.logger,
 		func() int64 { return p.currentBlockHeight.Load() },
-		p.config.GracePeriodExtraBlocks,
+		0, // No extra grace period - use on-chain params only
 	)
 	p.sessionMonitor.Start()
 
