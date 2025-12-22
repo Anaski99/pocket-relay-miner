@@ -2,6 +2,8 @@ package cache
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -189,6 +191,21 @@ func (c *RedisSessionCache) GetSession(ctx context.Context, appAddress, serviceI
 		cacheGetLatency.WithLabelValues("session", "l3_error").Observe(time.Since(start).Seconds())
 		return nil, fmt.Errorf("failed to query session: %w", err)
 	}
+
+	// +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+	// ADDING SESSION DEBUG INFORMATION SINCE WE ARE OBSERVING THAN SOME SESSIONS ARE NOT DETERMINISTIC AT THE END
+	// +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+	bytes, _ := session.Marshal()
+	hash := sha256.Sum256(bytes)
+	sessionHash := hex.EncodeToString(hash[:])
+	c.logger.Info().
+		Str("session_id", session.SessionId).
+		Str("service_id", serviceId).
+		Int64("height", height).
+		Str("raw", string(bytes)).
+		Str("sha256", sessionHash).
+		Msg("session fetched from chain")
+
 	chainQueries.WithLabelValues("session").Inc()
 	cacheGetLatency.WithLabelValues("session", CacheLevelL3).Observe(time.Since(start).Seconds())
 
