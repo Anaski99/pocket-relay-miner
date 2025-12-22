@@ -33,7 +33,7 @@ import (
 
 const (
 	// DefaultGasLimit is the default gas limit for transactions when not using simulation.
-	DefaultGasLimit = 800000
+	DefaultGasLimit = 600000
 
 	// DefaultGasPrice is the default gas price in upokt.
 	DefaultGasPrice = "0.000001upokt"
