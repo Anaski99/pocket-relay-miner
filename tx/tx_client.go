@@ -190,6 +190,9 @@ func NewTxClient(
 		Str("endpoint", config.GRPCEndpoint).
 		Str("chain_id", config.ChainID).
 		Bool("shared_conn", !ownsConn).
+		Uint64("gas_limit", config.GasLimit).
+		Str("gas_price", config.GasPrice.String()).
+		Float64("gas_adjustment", config.GasAdjustment).
 		Msg("transaction client initialized")
 
 	return tc, nil
@@ -279,6 +282,15 @@ func (tc *TxClient) SubmitProofs(
 
 	txHash, err := tc.signAndBroadcast(ctx, supplierOperatorAddr, uint64(timeoutHeight), "proof", msgs...)
 	if err != nil {
+		// Check if error is "proof not required" - this is benign (claim already settled without proof)
+		if isProofNotRequiredError(err) {
+			tc.logger.Info().
+				Str("supplier", supplierOperatorAddr).
+				Int("num_proofs", len(proofs)).
+				Msg("proof submission skipped: blockchain indicates proof not required (claim already settled)")
+			// Return empty hash to indicate success without submission
+			return "", nil
+		}
 		txProofErrors.WithLabelValues(supplierOperatorAddr, "broadcast").Inc()
 		return "", fmt.Errorf("failed to broadcast proofs: %w", err)
 	}
@@ -345,6 +357,7 @@ func (tc *TxClient) signAndBroadcast(
 
 	// Determine gas limit and fees
 	var gasLimit uint64
+	var feeAmount cosmostypes.Coins
 
 	if tc.config.GasLimit == 0 {
 		// Automatic gas estimation: simulate transaction to estimate gas
@@ -362,13 +375,16 @@ func (tc *TxClient) signAndBroadcast(
 			Float64("gas_adjustment", tc.config.GasAdjustment).
 			Uint64("final_gas_limit", gasLimit).
 			Msg("gas simulation succeeded")
+		feeAmount = tc.calculateFeeForGas(gasLimit)
 	} else {
 		// Use explicit gas limit
 		gasLimit = tc.config.GasLimit
+		feeAmount = tc.calculateFee()
 	}
 
 	// Set gas limit and fees
 	txBuilder.SetGasLimit(gasLimit)
+	txBuilder.SetFeeAmount(feeAmount)
 
 	// Sign the transaction (unordered=true means sequence=0)
 	err = tc.signTx(ctx, txBuilder, privKey, account, true)
@@ -435,6 +451,26 @@ func (tc *TxClient) signAndBroadcast(
 
 	txBroadcastsTotal.WithLabelValues(signerAddr, "success").Inc()
 	return txHash, nil
+}
+
+// calculateFee calculates the transaction fee based on configured gas limit.
+// This is the MAXIMUM fee we're willing to pay (set before broadcast).
+func (tc *TxClient) calculateFee() cosmostypes.Coins {
+	return tc.calculateFeeForGas(tc.config.GasLimit)
+}
+
+// calculateFeeForGas calculates the transaction fee for a given gas limit.
+func (tc *TxClient) calculateFeeForGas(gasLimit uint64) cosmostypes.Coins {
+	gasLimitDec := math.LegacyNewDec(int64(gasLimit))
+	feeAmount := tc.config.GasPrice.Amount.Mul(gasLimitDec)
+
+	// Truncate and add 1 if there's a remainder to ensure we don't underpay
+	feeInt := feeAmount.TruncateInt()
+	if feeAmount.Sub(math.LegacyNewDecFromInt(feeInt)).IsPositive() {
+		feeInt = feeInt.Add(math.OneInt())
+	}
+
+	return cosmostypes.NewCoins(cosmostypes.NewCoin(tc.config.GasPrice.Denom, feeInt))
 }
 
 // signTx signs a transaction with the given private key.
@@ -628,6 +664,20 @@ func isInsufficientBalanceError(errorMsg string) bool {
 		}
 	}
 	return false
+}
+
+// isProofNotRequiredError checks if the error indicates proof is not required for the claim.
+// This happens when:
+// - The claim didn't meet the ProofRequestProbability threshold (probabilistic proof selection)
+// - The claim was already settled without requiring proof
+// - There's a timing race where the miner thinks proof is required but blockchain says it's not
+// This is a benign condition - no proof submission needed, claim already settled.
+func isProofNotRequiredError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errorMsg := strings.ToLower(err.Error())
+	return strings.Contains(errorMsg, "proof not required")
 }
 
 // isSequenceMismatchError checks if the error message indicates account sequence mismatch.

@@ -143,11 +143,25 @@ pocket-relay-miner redis keys --pattern "ha:*" --stats  # List all keys
 
 ## Development
 
+### Testing
+
+```bash
+make test              # Run all tests
+make test_miner        # Run miner tests with race detection
+make test-coverage     # Generate coverage report
+```
+
+**Test Quality Standards** (Rule #1 - Cannot be broken):
+- ✅ All tests use real miniredis (no mocks)
+- ✅ All tests pass with `-race` flag (no race conditions)
+- ✅ All tests are deterministic (no flaky behavior)
+- ✅ No arbitrary timeouts or sleeps
+
+### Code Quality
+
 ```bash
 make fmt            # Format code
 make lint           # Run linters
-make test           # Run tests
-make test-coverage  # Generate coverage report
 ```
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development workflow and guidelines.

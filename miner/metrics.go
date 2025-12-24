@@ -12,37 +12,38 @@ const (
 )
 
 var (
+	// Relay flow tracking metrics (for debugging SMST sealing issues)
+	relaysConsumedFromStream = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relays_consumed_from_stream_total",
+			Help:      "Total number of relays consumed from Redis Streams (relayer → miner)",
+		},
+		[]string{"supplier", "service_id"},
+	)
+
+	relaysAddedToSMST = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relays_added_to_smst_total",
+			Help:      "Total number of relays successfully added to SMST tree",
+		},
+		[]string{"supplier", "service_id", "session_id"},
+	)
+
+	relaysFailedSMST = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relays_failed_smst_total",
+			Help:      "Total number of relays that failed to add to SMST tree",
+		},
+		[]string{"supplier", "service_id", "session_id", "reason"},
+	)
+
 	// Relay consumption metrics
-	relaysConsumed = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "relays_consumed_total",
-			Help:      "Total number of relays consumed from Redis streams",
-		},
-		[]string{"supplier", "service_id"},
-	)
-
-	relaysProcessed = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "relays_processed_total",
-			Help:      "Total number of relays successfully processed",
-		},
-		[]string{"supplier", "service_id"},
-	)
-
-	relaysDeduplicated = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "relays_deduplicated_total",
-			Help:      "Total number of duplicate relays filtered",
-		},
-		[]string{"supplier", "service_id"},
-	)
-
 	relaysRejected = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
@@ -66,48 +67,6 @@ var (
 
 	// ====== OPERATOR-FOCUSED METRICS ======
 
-	// Sessions by state - helps operators see session lifecycle status at a glance
-	sessionsByState = observability.MinerFactory.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "sessions_by_state",
-			Help:      "Number of sessions in each state (active, claiming, claimed, proving, proved, settled)",
-		},
-		[]string{"supplier", "state"},
-	)
-
-	// Session info - detailed metrics per session for debugging
-	sessionRelayCount = observability.MinerFactory.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "session_relay_count",
-			Help:      "Number of relays in each session",
-		},
-		[]string{"supplier", "session_id", "service_id"},
-	)
-
-	sessionComputeUnits = observability.MinerFactory.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "session_compute_units",
-			Help:      "Total compute units in each session",
-		},
-		[]string{"supplier", "session_id", "service_id"},
-	)
-
-	sessionEndHeight = observability.MinerFactory.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "session_end_height",
-			Help:      "End height of each active session",
-		},
-		[]string{"supplier", "session_id"},
-	)
-
 	// Claim timing metrics - helps operators verify timing spread
 	claimScheduledHeight = observability.MinerFactory.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -115,16 +74,6 @@ var (
 			Subsystem: metricsSubsystem,
 			Name:      "claim_scheduled_height",
 			Help:      "Block height when claim is scheduled to be submitted",
-		},
-		[]string{"supplier", "session_id"},
-	)
-
-	claimBlocksUntilSubmit = observability.MinerFactory.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "claim_blocks_until_submit",
-			Help:      "Number of blocks until claim will be submitted (0 if already submitted)",
 		},
 		[]string{"supplier", "session_id"},
 	)
@@ -147,16 +96,6 @@ var (
 			Subsystem: metricsSubsystem,
 			Name:      "proof_scheduled_height",
 			Help:      "Block height when proof is scheduled to be submitted",
-		},
-		[]string{"supplier", "session_id"},
-	)
-
-	proofBlocksUntilSubmit = observability.MinerFactory.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "proof_blocks_until_submit",
-			Help:      "Number of blocks until proof will be submitted (0 if already submitted)",
 		},
 		[]string{"supplier", "session_id"},
 	)
@@ -332,6 +271,60 @@ var (
 			Help:      "DEPRECATED: Use compute_units_proved_total instead. Total compute units settled (proven) across all sessions",
 		},
 		[]string{"supplier", "service_id"},
+	)
+
+	// ====== ON-CHAIN SETTLEMENT TRACKING METRICS ======
+	// These metrics track actual on-chain settlement results from EventClaimSettled events
+
+	claimsSettledByStatus = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "claims_settled_by_status_total",
+			Help:      "Total claims settled on-chain by their validation status (proven=1, invalid=2, expired=3)",
+		},
+		[]string{"supplier", "service_id", "status"},
+	)
+
+	upoktEarnedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "upokt_earned_total",
+			Help:      "Total uPOKT actually earned from on-chain claim settlements (supplier's share from reward_distribution)",
+		},
+		[]string{"supplier", "service_id"},
+	)
+
+	computeUnitsSettledByStatus = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "compute_units_settled_by_status_total",
+			Help:      "Total compute units settled on-chain by validation status",
+		},
+		[]string{"supplier", "service_id", "status"},
+	)
+
+	relaysSettledByStatus = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relays_settled_by_status_total",
+			Help:      "Total relays settled on-chain by validation status (from num_relays field)",
+		},
+		[]string{"supplier", "service_id", "status"},
+	)
+
+	settlementLatencyBlocks = observability.MinerFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "settlement_latency_blocks",
+			Help:      "Blocks between session end and claim settlement",
+			Buckets:   []float64{5, 10, 15, 20, 25, 30, 40, 50, 75, 100},
+		},
+		[]string{"supplier", "status"},
 	)
 
 	// Deduplication metrics
@@ -897,19 +890,19 @@ var (
 // METRICS HELPER FUNCTIONS FOR OPERATORS
 // =============================================
 
-// RecordRelayConsumed records a relay consumed from the stream.
-func RecordRelayConsumed(supplier, serviceID string) {
-	relaysConsumed.WithLabelValues(supplier, serviceID).Inc()
+// RecordRelayConsumedFromStream records a relay consumed from Redis Stream.
+func RecordRelayConsumedFromStream(supplier, serviceID string) {
+	relaysConsumedFromStream.WithLabelValues(supplier, serviceID).Inc()
 }
 
-// RecordRelayProcessed records a relay successfully processed.
-func RecordRelayProcessed(supplier, serviceID string) {
-	relaysProcessed.WithLabelValues(supplier, serviceID).Inc()
+// RecordRelayAddedToSMST records a relay successfully added to SMST tree.
+func RecordRelayAddedToSMST(supplier, serviceID, sessionID string) {
+	relaysAddedToSMST.WithLabelValues(supplier, serviceID, sessionID).Inc()
 }
 
-// RecordRelayDeduplicated records a relay that was deduplicated.
-func RecordRelayDeduplicated(supplier, serviceID string) {
-	relaysDeduplicated.WithLabelValues(supplier, serviceID).Inc()
+// RecordRelayFailedSMST records a relay that failed to add to SMST tree.
+func RecordRelayFailedSMST(supplier, serviceID, sessionID, reason string) {
+	relaysFailedSMST.WithLabelValues(supplier, serviceID, sessionID, reason).Inc()
 }
 
 // RecordRelayRejected records a relay that was rejected.
@@ -922,50 +915,20 @@ func RecordRelayProcessingLatency(supplier string, seconds float64, statusCode s
 	relayProcessingLatency.WithLabelValues(supplier, statusCode).Observe(seconds)
 }
 
-// SetSessionsByState sets the count of sessions in a given state.
-func SetSessionsByState(supplier, state string, count float64) {
-	sessionsByState.WithLabelValues(supplier, state).Set(count)
-}
-
 // RecordSessionCreated increments the session created counter.
 func RecordSessionCreated(supplier, serviceID string) {
 	sessionsCreatedTotal.WithLabelValues(supplier, serviceID).Inc()
 }
 
-// SetSessionRelayCount sets the current relay count for a session.
-func SetSessionRelayCount(supplier, sessionID, serviceID string, count float64) {
-	sessionRelayCount.WithLabelValues(supplier, sessionID, serviceID).Set(count)
-}
-
-// SetSessionComputeUnits sets the current compute units for a session.
-func SetSessionComputeUnits(supplier, sessionID, serviceID string, units float64) {
-	sessionComputeUnits.WithLabelValues(supplier, sessionID, serviceID).Set(units)
-}
-
-// SetSessionEndHeight sets the end height for a session.
-func SetSessionEndHeight(supplier, sessionID string, height float64) {
-	sessionEndHeight.WithLabelValues(supplier, sessionID).Set(height)
-}
-
 // ClearSessionMetrics removes session-specific metrics when session completes.
 func ClearSessionMetrics(supplier, sessionID, serviceID string) {
-	sessionRelayCount.DeleteLabelValues(supplier, sessionID, serviceID)
-	sessionComputeUnits.DeleteLabelValues(supplier, sessionID, serviceID)
-	sessionEndHeight.DeleteLabelValues(supplier, sessionID)
 	claimScheduledHeight.DeleteLabelValues(supplier, sessionID)
-	claimBlocksUntilSubmit.DeleteLabelValues(supplier, sessionID)
 	proofScheduledHeight.DeleteLabelValues(supplier, sessionID)
-	proofBlocksUntilSubmit.DeleteLabelValues(supplier, sessionID)
 }
 
 // SetClaimScheduledHeight sets when a claim is scheduled to be submitted.
 func SetClaimScheduledHeight(supplier, sessionID string, height float64) {
 	claimScheduledHeight.WithLabelValues(supplier, sessionID).Set(height)
-}
-
-// SetClaimBlocksUntilSubmit sets blocks remaining until claim submission.
-func SetClaimBlocksUntilSubmit(supplier, sessionID string, blocks float64) {
-	claimBlocksUntilSubmit.WithLabelValues(supplier, sessionID).Set(blocks)
 }
 
 // RecordClaimSubmissionLatency records how many blocks after window opened the claim was submitted.
@@ -976,11 +939,6 @@ func RecordClaimSubmissionLatency(supplier string, blocksAfterWindowOpened float
 // SetProofScheduledHeight sets when a proof is scheduled to be submitted.
 func SetProofScheduledHeight(supplier, sessionID string, height float64) {
 	proofScheduledHeight.WithLabelValues(supplier, sessionID).Set(height)
-}
-
-// SetProofBlocksUntilSubmit sets blocks remaining until proof submission.
-func SetProofBlocksUntilSubmit(supplier, sessionID string, blocks float64) {
-	proofBlocksUntilSubmit.WithLabelValues(supplier, sessionID).Set(blocks)
 }
 
 // RecordProofSubmissionLatency records how many blocks after window opened the proof was submitted.
@@ -1121,4 +1079,28 @@ func RecordProofRequirementCheckError(supplier, operation string) {
 func RecordClaimCeilingExceeded(supplier, serviceID string, excessUpokt int64) {
 	claimCeilingExceededTotal.WithLabelValues(supplier, serviceID).Inc()
 	claimCeilingExceededUpokt.WithLabelValues(supplier, serviceID).Add(float64(excessUpokt))
+}
+
+// ====== ON-CHAIN SETTLEMENT TRACKING ======
+
+// RecordClaimSettled records an on-chain claim settlement event.
+// status should be one of: "proven" (1), "invalid" (2), "expired" (3).
+func RecordClaimSettled(supplier, serviceID, status string, numRelays, computeUnits int64, upoktEarned int64, sessionEndHeight, settlementHeight int64) {
+	// Track settlement by status
+	claimsSettledByStatus.WithLabelValues(supplier, serviceID, status).Inc()
+
+	// Track relays settled by status
+	relaysSettledByStatus.WithLabelValues(supplier, serviceID, status).Add(float64(numRelays))
+
+	// Track compute units settled by status
+	computeUnitsSettledByStatus.WithLabelValues(supplier, serviceID, status).Add(float64(computeUnits))
+
+	// Track revenue earned (only for proven claims)
+	if status == "proven" && upoktEarned > 0 {
+		upoktEarnedTotal.WithLabelValues(supplier, serviceID).Add(float64(upoktEarned))
+	}
+
+	// Track settlement latency
+	latency := settlementHeight - sessionEndHeight
+	settlementLatencyBlocks.WithLabelValues(supplier, status).Observe(float64(latency))
 }

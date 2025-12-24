@@ -2,12 +2,15 @@ package miner
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	stdhttp "net/http"
 	"runtime"
 	"strings"
 	"sync"
 
 	pond "github.com/alitto/pond/v2"
+	"github.com/cometbft/cometbft/rpc/client/http"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
@@ -34,6 +37,7 @@ type SupplierWorkerConfig struct {
 	Config      *Config
 
 	// Blockchain connection config
+	QueryNodeRPCUrl  string
 	QueryNodeGRPCUrl string
 	GRPCInsecure     bool
 	ChainID          string
@@ -130,6 +134,35 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		Str("grpc_endpoint", w.config.QueryNodeGRPCUrl).
 		Msg("query clients initialized")
 
+	// Create RPC client for querying specific block heights (needed for proof generation)
+	// This is CRITICAL - proof generation needs to query the exact block at a specific height
+	// to get the canonical BlockID.Hash that matches what the validator stores
+	var rpcClient *http.HTTP
+	if w.config.QueryNodeRPCUrl != "" {
+		if w.config.GRPCInsecure {
+			rpcClient, err = http.New(w.config.QueryNodeRPCUrl, "/websocket")
+		} else {
+			tlsConfig := &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			}
+			httpClient := &stdhttp.Client{
+				Transport: &stdhttp.Transport{
+					TLSClientConfig: tlsConfig,
+				},
+			}
+			rpcClient, err = http.NewWithClient(w.config.QueryNodeRPCUrl, "/websocket", httpClient)
+		}
+		if err != nil {
+			w.cleanup()
+			return fmt.Errorf("failed to create CometBFT RPC client: %w", err)
+		}
+		w.logger.Info().
+			Str("rpc_endpoint", w.config.QueryNodeRPCUrl).
+			Msg("created CometBFT RPC client for block queries")
+	} else {
+		w.logger.Warn().Msg("QueryNodeRPCUrl not configured - proof generation may fail")
+	}
+
 	// Create Redis block subscriber (subscribes to block events via Redis pub/sub)
 	// This allows non-leader miners to receive block events published by the leader
 	redisBlockSubscriber := cache.NewRedisBlockSubscriber(
@@ -144,9 +177,11 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 	w.logger.Info().Msg("redis block subscriber started (receiving events from leader)")
 
 	// Create Redis block client adapter to implement client.BlockClient interface
+	// Pass the RPC client so it can query specific block heights for proof generation
 	w.redisBlockClientAdapter = cache.NewRedisBlockClientAdapter(
 		w.logger,
 		redisBlockSubscriber,
+		rpcClient, // For GetBlockAtHeight() - critical for proof generation
 	)
 	if err = w.redisBlockClientAdapter.Start(ctx); err != nil {
 		w.cleanup()
@@ -324,6 +359,14 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 
 // handleRelay processes a relay message.
 func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, msg *transport.StreamMessage) error {
+	// CRITICAL: Log that we're processing a relay
+	w.logger.Debug().
+		Str("supplier", supplierAddr).
+		Str("session_id", msg.Message.SessionId).
+		Str("service_id", msg.Message.ServiceId).
+		Uint64("compute_units", msg.Message.ComputeUnitsPerRelay).
+		Msg("handleRelay: processing relay message")
+
 	state, ok := w.supplierManager.GetSupplierState(supplierAddr)
 	if !ok {
 		return fmt.Errorf("supplier state not found: %s", supplierAddr)
@@ -365,16 +408,24 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 		msg.Message.RelayBytes,
 		msg.Message.ComputeUnitsPerRelay,
 	); err != nil {
-		if strings.Contains(err.Error(), "already been claimed") {
+		// Handle sealing or already claimed errors (late relays)
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "already been claimed") || strings.Contains(errMsg, "is sealing") {
 			w.logger.Info().
 				Str("session_id", msg.Message.SessionId).
 				Str("supplier", supplierAddr).
-				Msg("dropping late relay - session already claimed (SMST check)")
+				Msg("dropping late relay - session sealed or claimed (SMST check)")
 			RecordRelayRejected(supplierAddr, "session_sealed", msg.Message.ServiceId)
+			RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, msg.Message.SessionId, "session_sealed")
 			return nil
 		}
+		// Other SMST errors (e.g., tree full, corruption)
+		RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, msg.Message.SessionId, "smst_error")
 		return fmt.Errorf("failed to update SMST: %w", err)
 	}
+
+	// Track relay successfully added to SMST
+	RecordRelayAddedToSMST(supplierAddr, msg.Message.ServiceId, msg.Message.SessionId)
 
 	// Track relay in session coordinator
 	if err := state.SessionCoordinator.OnRelayProcessed(

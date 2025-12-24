@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/big"
 	"sync"
 	"time"
@@ -502,7 +503,9 @@ func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, s
 		return 0, fmt.Errorf("failed to get session params: %w", err)
 	}
 
-	// Calculate baseLimit = (appStake / numSuppliers) / proof_window_close_offset_blocks
+	// Calculate baseLimit = (appStake / numSuppliers) / pendingSessions
+	// This matches the poktroll relayer implementation.
+	// See: poktroll/pkg/relayer/proxy/relay_meter.go:getAppStakePortionPayableToSessionSupplier
 	numSuppliers := int64(sessionParams.NumSuppliersPerSession)
 	if numSuppliers == 0 {
 		numSuppliers = 1
@@ -510,14 +513,26 @@ func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, s
 
 	appStakePerSupplier := appStakeUpokt / numSuppliers
 
-	// Use proof_window_close_offset_blocks from shared params
+	// Calculate pending sessions (includes current session + closed sessions awaiting settlement)
+	numBlocksPerSession := int64(sharedParams.GetNumBlocksPerSession())
 	proofWindowCloseBlocks := int64(sharedParams.GetProofWindowCloseOffsetBlocks())
+
 	if proofWindowCloseBlocks == 0 {
 		m.logger.Warn().Msg("proof_window_close_offset_blocks is 0, using 1 to avoid division by zero")
 		proofWindowCloseBlocks = 1
 	}
 
-	baseLimit := appStakePerSupplier / proofWindowCloseBlocks
+	if numBlocksPerSession == 0 {
+		m.logger.Warn().Msg("num_blocks_per_session is 0, using 1 to avoid division by zero")
+		numBlocksPerSession = 1
+	}
+
+	// Calculate how many closed sessions are awaiting settlement
+	numClosedSessionsAwaitingSettlement := int64(math.Ceil(float64(proofWindowCloseBlocks) / float64(numBlocksPerSession)))
+	// Add 1 for the current session
+	pendingSessions := numClosedSessionsAwaitingSettlement + 1
+
+	baseLimit := appStakePerSupplier / pendingSessions
 
 	// Check if serviceFactor is configured
 	var effectiveLimit int64

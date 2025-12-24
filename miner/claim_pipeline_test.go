@@ -159,11 +159,14 @@ func (m *mockSharedQueryClient) GetEarliestSupplierProofCommitHeight(ctx context
 
 // mockBlockClient implements client.BlockClient for testing
 type mockBlockClient struct {
+	mu            sync.RWMutex
 	currentHeight int64
 	blockHash     []byte
 }
 
 func (m *mockBlockClient) LastBlock(ctx context.Context) client.Block {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return &mockBlock{
 		height: m.currentHeight,
 		hash:   m.blockHash,
@@ -629,7 +632,9 @@ func TestClaimPipeline_WaitForClaimWindow(t *testing.T) {
 	pipeline, _, _, sharedClient, blockClient := setupClaimPipelineTest(t)
 
 	// Set current height below claim window
+	blockClient.mu.Lock()
 	blockClient.currentHeight = 100
+	blockClient.mu.Unlock()
 
 	sharedClient.params = &sharedtypes.Params{
 		NumBlocksPerSession:          4,
@@ -646,7 +651,9 @@ func TestClaimPipeline_WaitForClaimWindow(t *testing.T) {
 	// Start goroutine to advance block height
 	go func() {
 		time.Sleep(100 * time.Millisecond)
+		blockClient.mu.Lock()
 		blockClient.currentHeight = 106 // Claim window opens at 106 (sessionEnd + offset + 1)
+		blockClient.mu.Unlock()
 	}()
 
 	height, hash, err := pipeline.WaitForClaimWindow(ctx, sessionEndHeight)

@@ -258,3 +258,39 @@ func ForMiner(logger Logger, minerID, replica string) Logger {
 		Str(FieldReplica, replica).
 		Logger()
 }
+
+// ReplicaStatusProvider is an interface for components that can provide replica status dynamically.
+type ReplicaStatusProvider interface {
+	IsLeader() bool
+}
+
+// replicaHook is a zerolog hook that dynamically adds replica status field.
+type replicaHook struct {
+	provider ReplicaStatusProvider
+	minerID  string
+}
+
+// Run adds the dynamic replica field to each log event.
+func (h *replicaHook) Run(e *zerolog.Event, level zerolog.Level, msg string) {
+	if h.provider == nil {
+		return
+	}
+
+	replica := ReplicaStandby
+	if h.provider.IsLeader() {
+		replica = ReplicaLeader
+	}
+
+	e.Str(FieldReplica, replica).Str(FieldMinerID, h.minerID)
+}
+
+// ForMinerDynamic returns a logger with dynamic replica status.
+// The replica field is evaluated at log time based on the provider's IsLeader() result.
+// This allows the logger to automatically reflect leader election changes.
+func ForMinerDynamic(logger Logger, minerID string, replicaProvider ReplicaStatusProvider) Logger {
+	hook := &replicaHook{
+		provider: replicaProvider,
+		minerID:  minerID,
+	}
+	return logger.Hook(hook)
+}

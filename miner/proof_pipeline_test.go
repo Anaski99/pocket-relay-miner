@@ -399,7 +399,9 @@ func TestProofPipeline_WaitForProofWindow(t *testing.T) {
 	pipeline, _, _, sharedClient, _, blockClient := setupProofPipelineTest(t)
 
 	// Set current height below proof window
+	blockClient.mu.Lock()
 	blockClient.currentHeight = 105
+	blockClient.mu.Unlock()
 
 	sharedClient.params = &sharedtypes.Params{
 		NumBlocksPerSession:          4,
@@ -418,7 +420,9 @@ func TestProofPipeline_WaitForProofWindow(t *testing.T) {
 	// Start goroutine to advance block height
 	go func() {
 		time.Sleep(100 * time.Millisecond)
+		blockClient.mu.Lock()
 		blockClient.currentHeight = 110 // Proof window opens at 110 (claimClose + proofOffset)
+		blockClient.mu.Unlock()
 	}()
 
 	height, hash, err := pipeline.WaitForProofWindow(ctx, sessionEndHeight)

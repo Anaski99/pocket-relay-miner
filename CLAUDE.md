@@ -24,6 +24,42 @@ This file (CLAUDE.md) provides AI-specific guidance. For general contribution ru
 - **Zero Tolerance for Sloppiness**: Clean, structured, tested code is mandatory.
 - **Performance Matters**: Every millisecond counts. Benchmark critical paths.
 
+## CRITICAL DEVELOPMENT WORKFLOW REMINDERS
+
+**READ THIS EVERY TIME BEFORE SUGGESTING COMMANDS:**
+
+1. **Building Code**
+   - ✅ USE: `make build` (for development builds)
+   - ✅ USE: `make build-release` (for production builds)
+   - ❌ NEVER: `go build` directly
+   - **WHY**: Makefile handles build flags, versioning, and cross-compilation correctly
+
+2. **Tilt Development Environment**
+   - ✅ ALL services are running in Kubernetes via Tilt
+   - ✅ ALL ports are proxied automatically by Tilt (no manual port-forwards needed)
+   - ✅ Tilt watches files and rebuilds/restarts automatically (no manual builds needed)
+   - ✅ After code changes, Tilt rebuilds automatically (just wait, don't trigger builds)
+   - ❌ NEVER: `kubectl port-forward` (Tilt does this automatically)
+   - ❌ NEVER: Manual builds when Tilt is running (it rebuilds automatically)
+   - ❌ NEVER: Manual pod deletion (Tilt restarts automatically after rebuild)
+
+3. **Redis Debugging**
+   - ✅ USE: `redis-cli` locally (Redis is proxied by Tilt)
+   - ❌ NEVER: Suggest using pocket-relay-miner redis-debug subcommands
+   - **WHY**: redis-cli is the standard tool, and Redis is already accessible locally via Tilt proxy
+
+4. **Testing**
+   - ✅ USE: `make test` (runs all tests)
+   - ✅ USE: `make test-coverage` (generates coverage reports)
+   - ✅ USE: Test scripts in `scripts/` folder (e.g., `./scripts/test-simple-relay.sh`)
+   - ❌ NEVER: Run tests without `make` unless debugging a specific package
+
+5. **Kubernetes Access**
+   - ✅ ALL Kubernetes resources are accessible via standard kubectl commands
+   - ✅ Services are accessible via Tilt proxy (check Tilt UI for URLs)
+   - ✅ Logs: `kubectl logs -l app=<service>`
+   - ✅ Exec: `kubectl exec -it <pod> -- <command>`
+
 ## Project Overview
 
 **Pocket RelayMiner (HA)** is a production-grade, horizontally scalable relay mining service for Pocket Network with full multi-transport support.
@@ -85,16 +121,29 @@ This file (CLAUDE.md) provides AI-specific guidance. For general contribution ru
    - Never log sensitive data (private keys, credentials)
 
 3. **Concurrency**
+   - ✅ USE: Worker pools (`github.com/sourcegraph/conc/pool`) for bounded concurrency
+   - ❌ NEVER: Unbounded `go func()` - ALWAYS use worker pools to limit goroutines
    - Use `xsync.MapOf` for lock-free concurrent maps
    - Protect shared state with `sync.RWMutex` when necessary
    - Use `context.Context` for cancellation and timeouts
    - ALWAYS defer `Close()` or cleanup functions
+   - **Worker Pool Pattern**:
+     ```go
+     pool := pool.New().WithMaxGoroutines(10)
+     pool.Go(func() { /* work */ })
+     pool.Wait() // Wait for all tasks to complete
+     ```
 
 4. **Testing**
    - Unit tests for all business logic
    - Benchmarks for critical paths (SMST ops, validation, signing)
    - Integration tests with miniredis for Redis operations
    - Use `-tags test` build constraint for test-only code
+   - **Rule #1 (CANNOT BE BROKEN)**: No flaky tests, no race conditions, no timeout weird tests, no mock/fake tests
+     - All tests must pass `go test -race` without warnings
+     - All tests must use real implementations (miniredis for Redis, not mocks)
+     - All tests must be deterministic (no `time.Sleep()`, no random ordering dependencies)
+     - Any test that fails once in 1000 runs must be fixed or deleted
 
 5. **Performance**
    - Profile before optimizing: `go test -bench . -benchmem`
@@ -357,8 +406,10 @@ make build-release          # Production build (optimized)
 
 # Testing
 make test                   # Run all tests
+make test_miner            # Run miner tests with race detection (Rule #1 compliant)
 make test-coverage          # Generate coverage report
 go test -tags test ./...    # Run tests including test-tagged code
+go test -race ./...         # Run with race detector
 
 # Code Quality
 make fmt                    # Format code

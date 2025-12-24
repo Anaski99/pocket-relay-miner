@@ -777,7 +777,7 @@
           "amount": "250000",
           "denom": "upokt"
         },
-        "proof_request_probability": "0.25",
+        "proof_request_probability": "1",
         "proof_requirement_threshold": {
           "amount": "20000000",
           "denom": "upokt"
@@ -801,25 +801,25 @@
       "relayMiningDifficultyList": [],
       "serviceList": [
         {
-          "compute_units_per_relay": 100,
+          "compute_units_per_relay": 1000000,
           "id": "develop-http",
           "name": "develop-http",
           "owner_address": "pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5"
         },
         {
-          "compute_units_per_relay": 100,
+          "compute_units_per_relay": 1000000,
           "id": "develop-websocket",
           "name": "develop-websocket",
           "owner_address": "pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5"
         },
         {
-          "compute_units_per_relay": 100,
+          "compute_units_per_relay": 1000000,
           "id": "develop-stream",
           "name": "develop-stream",
           "owner_address": "pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5"
         },
         {
-          "compute_units_per_relay": 100,
+          "compute_units_per_relay": 1000000,
           "id": "develop-grpc",
           "name": "develop-grpc",
           "owner_address": "pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5"
@@ -838,7 +838,7 @@
         "claim_window_close_offset_blocks": 4,
         "claim_window_open_offset_blocks": 4,
         "compute_unit_cost_granularity": 1000000,
-        "compute_units_to_tokens_multiplier": 42,
+        "compute_units_to_tokens_multiplier": 1,
         "gateway_unbonding_period_sessions": 1,
         "grace_period_end_offset_blocks": 2,
         "num_blocks_per_session": 10,
@@ -2002,7 +2002,7 @@
     "tokenomics": {
       "params": {
         "dao_reward_address": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
-        "global_inflation_per_claim": 0.1,
+        "global_inflation_per_claim": 0,
         "mint_allocation_percentages": {
           "application": 0,
           "dao": 0.1,

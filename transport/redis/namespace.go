@@ -308,6 +308,20 @@ func (kb *KeyBuilder) SMSTNodesPrefix() string {
 	return fmt.Sprintf("%s:smst:", kb.ns.BasePrefix)
 }
 
+// SMSTRootKey builds the key for storing the claimed root hash.
+// Format: {base}:smst:{sessionID}:root
+// Example: "ha:smst:session123:root"
+func (kb *KeyBuilder) SMSTRootKey(sessionID string) string {
+	return fmt.Sprintf("%s:smst:%s:root", kb.ns.BasePrefix, sessionID)
+}
+
+// SMSTStatsKey builds the key for storing tree statistics (count and sum).
+// Format: {base}:smst:{sessionID}:stats
+// Example: "ha:smst:session123:stats"
+func (kb *KeyBuilder) SMSTStatsKey(sessionID string) string {
+	return fmt.Sprintf("%s:smst:%s:stats", kb.ns.BasePrefix, sessionID)
+}
+
 // ServiceFactorDefaultKey builds the key for the default service factor.
 // Format: {base}:service_factor:default
 // Example: "ha:service_factor:default"

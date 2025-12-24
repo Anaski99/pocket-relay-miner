@@ -76,6 +76,7 @@ type LeaderController struct {
 	blockHealthMonitor    *BlockHealthMonitor
 	supplierRegistry      *SupplierRegistry
 	serviceFactorRegistry *ServiceFactorRegistry
+	settlementMonitor     *SettlementMonitor
 	masterPool            pond.Pool
 
 	// Lifecycle
@@ -446,12 +447,13 @@ func (c *LeaderController) Start(ctx context.Context) error {
 				msg.Message.RelayBytes,
 				msg.Message.ComputeUnitsPerRelay,
 			); err != nil {
-				// Handle session sealed errors (backup check - SMST's in-memory claimedRoot)
-				if strings.Contains(err.Error(), "already been claimed") {
+				// Handle session sealed errors (backup check - SMST's in-memory seal/claimed state)
+				errMsg := err.Error()
+				if strings.Contains(errMsg, "already been claimed") || strings.Contains(errMsg, "is sealing") {
 					c.logger.Info().
 						Str("session_id", msg.Message.SessionId).
 						Str("supplier", supplierAddr).
-						Msg("dropping late relay - session already claimed (SMST check)")
+						Msg("dropping late relay - session sealed or claimed (SMST check)")
 					RecordRelayRejected(supplierAddr, "session_sealed", msg.Message.ServiceId)
 					return nil
 				}
@@ -529,6 +531,32 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		c.logger.Info().Msg("balance monitor started")
 	}
 
+	// Start settlement monitor to track on-chain claim settlements
+	// Get supplier addresses to monitor
+	suppliersMap, err := c.supplierRegistry.GetAllSuppliers(ctx)
+	if err != nil {
+		c.cleanup()
+		return fmt.Errorf("failed to get suppliers for settlement monitor: %w", err)
+	}
+	supplierAddresses := make([]string, 0, len(suppliersMap))
+	for addr := range suppliersMap {
+		supplierAddresses = append(supplierAddresses, addr)
+	}
+
+	c.settlementMonitor = NewSettlementMonitor(
+		c.logger,
+		c.blockSubscriber,
+		c.blockSubscriber.GetRPCClient(),
+		supplierAddresses,
+	)
+	if err := c.settlementMonitor.Start(ctx); err != nil {
+		c.cleanup()
+		return fmt.Errorf("failed to start settlement monitor: %w", err)
+	}
+	c.logger.Info().
+		Int("suppliers", len(supplierAddresses)).
+		Msg("settlement monitor started (tracking on-chain claim settlements)")
+
 	c.active = true
 	c.logger.Info().Msg("leader controller started - all resources active")
 	return nil
@@ -555,6 +583,11 @@ func (c *LeaderController) Close() error {
 // Must be called with c.mu held.
 func (c *LeaderController) cleanup() {
 	// Close in reverse order of creation
+	if c.settlementMonitor != nil {
+		c.settlementMonitor.Close()
+		c.settlementMonitor = nil
+	}
+
 	if c.balanceMonitor != nil {
 		if err := c.balanceMonitor.Close(); err != nil {
 			c.logger.Error().Err(err).Msg("failed to close balance monitor")

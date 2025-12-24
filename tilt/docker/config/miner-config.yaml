@@ -52,6 +52,13 @@ known_applications:
   - "pokt1lqyu4v88vp8tzc86eaqr4lq8rwhssyn6rfwzex"  # app3
   - "pokt1pn64d94e6u5g8cllsnhgrl6t96ysnjw59j5gst"  # app4
 
+transaction:
+  # Automatic gas estimation (recommended)
+  gas_limit: 0
+  gas_price: "0.000001upokt"
+  # Using 2.5 instead of default 1.7 to verify config is actually loaded
+  gas_adjustment: 2.5
+
 metrics:
   enabled: true
   addr: "0.0.0.0:9092"

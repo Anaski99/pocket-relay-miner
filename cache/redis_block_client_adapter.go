@@ -2,10 +2,12 @@ package cache
 
 import (
 	"context"
+	"fmt"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
 
+	"github.com/cometbft/cometbft/rpc/client/http"
 	"github.com/hashicorp/go-version"
 	localclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -20,9 +22,11 @@ import (
 // 1. Subscribe to Redis pub/sub for block events from miner
 // 2. Maintain local cache of last block (for LastBlock() calls)
 // 3. Provide BlockEvents() channel for components expecting it
+// 4. Query specific block heights via RPC (for proof generation)
 type RedisBlockClientAdapter struct {
 	logger          logging.Logger
 	redisSubscriber *RedisBlockSubscriber
+	cometClient     *http.HTTP // For querying specific block heights (proof generation)
 	lastBlock       atomic.Pointer[simpleBlock]
 	blockEventsCh   chan client.Block
 	ctx             context.Context
@@ -40,13 +44,16 @@ type RedisBlockClientAdapter struct {
 // Parameters:
 // - logger: Logger for the adapter
 // - redisSubscriber: RedisBlockSubscriber that receives events from Redis pub/sub
+// - cometClient: CometBFT RPC client for querying specific block heights (can be nil for relayers)
 func NewRedisBlockClientAdapter(
 	logger logging.Logger,
 	redisSubscriber *RedisBlockSubscriber,
+	cometClient *http.HTTP,
 ) *RedisBlockClientAdapter {
 	return &RedisBlockClientAdapter{
 		logger:          logging.ForComponent(logger, logging.ComponentRedisBlockClientAdapter),
 		redisSubscriber: redisSubscriber,
+		cometClient:     cometClient,
 		blockEventsCh:   make(chan client.Block, 2000),
 	}
 }
@@ -123,6 +130,35 @@ func (a *RedisBlockClientAdapter) LastBlock(ctx context.Context) client.Block {
 		return &simpleBlock{height: 0, hash: nil}
 	}
 	return block
+}
+
+// GetBlockAtHeight queries the blockchain for a specific block by height.
+// This is CRITICAL for proof generation - the validator uses the exact block at a specific
+// height, so we must query that exact block to get the correct BlockID.Hash.
+//
+// IMPORTANT: Uses BlockID.Hash (canonical block identifier) instead of Block.Hash() (computed hash).
+// This must match what the validator stores via ctx.HeaderHash() in StoreBlockHash().
+//
+// Returns an error if cometClient is nil (relayers don't need this functionality).
+func (a *RedisBlockClientAdapter) GetBlockAtHeight(ctx context.Context, height int64) (client.Block, error) {
+	if a.cometClient == nil {
+		return nil, fmt.Errorf("GetBlockAtHeight not supported: cometClient is nil (this adapter is configured for relayers only)")
+	}
+
+	result, err := a.cometClient.Block(ctx, &height)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query block at height %d: %w", height, err)
+	}
+
+	// CRITICAL: Use BlockID.Hash (canonical block ID) instead of Block.Hash() (computed hash)
+	// This must match what the validator stores in ctx.HeaderHash() via StoreBlockHash()
+	// See: poktroll/x/session/keeper/keeper.go:82
+	block := &simpleBlock{
+		height: result.Block.Height,
+		hash:   result.BlockID.Hash, // ✅ Canonical hash
+	}
+
+	return block, nil
 }
 
 // GetChainVersion returns nil - not used in production.

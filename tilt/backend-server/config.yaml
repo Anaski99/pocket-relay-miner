@@ -9,11 +9,14 @@ grpc_port: 50051
 # Prometheus metrics port
 metrics_port: 9095
 
-# Error injection rate (0.0 = disabled, 0.05 = 5% of requests fail)
+# Error injection rate (0.0 = disabled, 0.33 = 33% of requests return random error)
 error_rate: 0.0
 
-# HTTP error code to inject when error_rate > 0
-error_code: 500
+# List of HTTP error codes to randomly inject (200 = success mixed with errors)
+error_codes: [200]
+
+# HTTP error code to inject when error_rate > 0 (legacy, use error_codes instead)
+# error_code: 500
 
 # Delay in milliseconds to simulate latency (0 = no delay)
 delay_ms: 0

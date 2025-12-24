@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -53,6 +52,9 @@ type RelayGRPCService struct {
 
 	// Max response body size
 	maxBodySize int64
+
+	// Buffer pool for reading backend responses efficiently
+	bufferPool *BufferPool
 }
 
 // RelayGRPCServiceConfig contains configuration for the relay gRPC service.
@@ -64,6 +66,7 @@ type RelayGRPCServiceConfig struct {
 	RelayPipeline      *RelayPipeline // Unified relay processing pipeline
 	CurrentBlockHeight *atomic.Int64
 	MaxBodySize        int64
+	BufferPool         *BufferPool
 	// GetHTTPClient returns the HTTP client for a service (supports per-service timeout profiles)
 	GetHTTPClient func(serviceID string) *http.Client
 	// GetServiceTimeout returns the request timeout for a service (from timeout profile)
@@ -104,6 +107,12 @@ func NewRelayGRPCService(logger logging.Logger, config RelayGRPCServiceConfig) *
 		maxBodySize = 10 * 1024 * 1024 // 10MB default
 	}
 
+	bufferPool := config.BufferPool
+	if bufferPool == nil {
+		// Create a default buffer pool if not provided
+		bufferPool = NewBufferPool(maxBodySize)
+	}
+
 	return &RelayGRPCService{
 		logger:             logger.With().Str(logging.FieldComponent, "grpc_relay_service").Logger(),
 		serviceConfigs:     config.ServiceConfigs,
@@ -113,6 +122,7 @@ func NewRelayGRPCService(logger logging.Logger, config RelayGRPCServiceConfig) *
 		relayPipeline:      config.RelayPipeline,
 		currentBlockHeight: config.CurrentBlockHeight,
 		maxBodySize:        maxBodySize,
+		bufferPool:         bufferPool,
 		getHTTPClient:      getHTTPClient,
 		getServiceTimeout:  getServiceTimeout,
 	}
@@ -310,6 +320,18 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 		return nil
 	}
 
+	// Check for 5xx backend errors - these should NOT be wrapped, signed, or mined
+	// 2xx-4xx are valid relays (client/backend logic errors that should be paid)
+	// 5xx are infrastructure/backend failures (supplier should not be compensated)
+	if respStatus >= http.StatusInternalServerError {
+		grpcRelayErrors.WithLabelValues(serviceID, "backend_5xx").Inc()
+		logging.WithSessionContext(s.logger.Warn(), sessionCtx).
+			Int("status_code", respStatus).
+			Msg("backend returned 5xx error - relay not mined")
+		// Return gRPC error without wrapping/signing/mining
+		return status.Errorf(codes.Unavailable, "backend service error: HTTP %d", respStatus)
+	}
+
 	// Build and sign the RelayResponse
 	relayResponse, relayResponseBz, err := s.responseSigner.BuildAndSignRelayResponseFromBody(
 		relayRequest,
@@ -482,14 +504,11 @@ func (s *RelayGRPCService) forwardToBackend(
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// Read response body with size limit
-	limitedReader := io.LimitReader(resp.Body, s.maxBodySize+1)
-	respBody, err := io.ReadAll(limitedReader)
+	// Read response body using buffer pool to avoid RAM exhaustion
+	// The buffer pool enforces the size limit and reuses buffers
+	respBody, err := s.bufferPool.ReadWithBuffer(resp.Body)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("failed to read response: %w", err)
-	}
-	if int64(len(respBody)) > s.maxBodySize {
-		return nil, nil, 0, fmt.Errorf("response too large: %d > %d", len(respBody), s.maxBodySize)
 	}
 
 	return respBody, resp.Header, resp.StatusCode, nil

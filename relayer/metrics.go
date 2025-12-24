@@ -30,7 +30,7 @@ var (
 			Name:      "relays_served_total",
 			Help:      "Total number of relay requests successfully served",
 		},
-		[]string{"service_id", "rpc_type"},
+		[]string{"service_id", "rpc_type", "status_code"},
 	)
 
 	relaysRejected = observability.RelayerFactory.NewCounterVec(
@@ -40,7 +40,7 @@ var (
 			Name:      "relays_rejected_total",
 			Help:      "Total number of relay requests rejected",
 		},
-		[]string{"service_id", "reason"},
+		[]string{"service_id", "rpc_type", "reason"},
 	)
 
 	relaysPublished = observability.RelayerFactory.NewCounterVec(
@@ -60,7 +60,7 @@ var (
 			Name:      "relays_dropped_total",
 			Help:      "Total number of relays served but not mined (optimistic mode: validation failed, meter error, stake exhausted)",
 		},
-		[]string{"service_id", "reason"},
+		[]string{"service_id", "application", "reason"},
 	)
 
 	// === CRITICAL HISTOGRAMS (async recorded to avoid hot path blocking) ===
@@ -74,7 +74,7 @@ var (
 			Help:      "End-to-end latency of relay requests (request received to response sent)",
 			Buckets:   observability.FineGrainedLatencyBuckets,
 		},
-		[]string{"service_id"},
+		[]string{"service_id", "rpc_type"},
 	)
 
 	backendLatency = observability.RelayerFactory.NewHistogramVec(

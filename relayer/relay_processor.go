@@ -149,18 +149,20 @@ func (rp *relayProcessor) ProcessRelay(
 		Res: relayResp,
 	}
 
-	// Calculate relay hash
+	// CRITICAL: Dehydrate the payload BEFORE marshaling for SMST storage.
+	// This ensures the SMST root hash matches what the blockchain validator expects.
+	// The signature was already computed over the full payload in buildRelayResponse(),
+	// and the PayloadHash field allows verification without the full payload (v0.1.25+).
+	// Reference: ../poktroll/pkg/relayer/miner/miner.go:107-111
+	relayResp.Payload = nil
+
+	// Calculate relay hash (now WITHOUT payload - matches blockchain expectation)
 	relayBz, err := relay.Marshal()
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal relay: %w", err)
 	}
 
 	relayHash := protocol.GetRelayHashFromBytes(relayBz)
-
-	// Dehydrate the payload for storage efficiency (keep only hash + signature)
-	// The signature was computed over the full payload, and the hash includes it
-	// Now we can clear it to reduce SMST and proof sizes
-	relayResp.Payload = nil
 
 	// Check mining difficulty
 	isApplicable, err := rp.checkMiningDifficulty(ctx, serviceID, relayHash[:])
@@ -245,7 +247,7 @@ func (rp *relayProcessor) buildRelayResponse(
 	}
 
 	// Calculate payload hash for signature efficiency (v0.1.25+)
-	// This allows the response payload to be nil'd after signing
+	// This allows the response payload to be nil'd before SMST storage
 	// while still being verifiable via the payload hash
 	payloadHash := sha256.Sum256(respBody)
 	relayResp.PayloadHash = payloadHash[:]
@@ -259,8 +261,8 @@ func (rp *relayProcessor) buildRelayResponse(
 		relayResp.Meta.SupplierOperatorSignature = sig
 	}
 
-	// NOTE: Payload is NOT cleared here - it's cleared in ProcessRelay() after hash computation
-	// This ensures the relay hash includes the full response payload
+	// NOTE: Payload is NOT cleared here - it's cleared in ProcessRelay() BEFORE marshaling.
+	// This ensures the relay bytes stored in the SMST match what the blockchain expects.
 	return relayResp, nil
 }
 

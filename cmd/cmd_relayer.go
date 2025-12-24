@@ -25,6 +25,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/relayer"
 	"github.com/pokt-network/pocket-relay-miner/rings"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
+	servicetypes "github.com/pokt-network/poktroll/x/service/types"
 )
 
 const (
@@ -87,6 +88,22 @@ Example:
 	_ = cmd.MarkFlagRequired(flagRelayerConfig)
 
 	return cmd
+}
+
+// serviceDifficultyQueryAdapter adapts the client.ServiceQueryClient to the
+// relayer.ServiceDifficultyQueryClient interface by extracting TargetHash.
+type serviceDifficultyQueryAdapter struct {
+	queryClient interface {
+		GetServiceRelayDifficulty(ctx context.Context, serviceID string) (servicetypes.RelayMiningDifficulty, error)
+	}
+}
+
+func (a *serviceDifficultyQueryAdapter) GetServiceRelayDifficulty(ctx context.Context, serviceID string) ([]byte, error) {
+	difficulty, err := a.queryClient.GetServiceRelayDifficulty(ctx, serviceID)
+	if err != nil {
+		return nil, err
+	}
+	return difficulty.TargetHash, nil
 }
 
 func runHARelayer(cmd *cobra.Command, _ []string) error {
@@ -379,9 +396,11 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Create RedisBlockClientAdapter to implement client.BlockClient interface
 	// This adapter receives events from Redis pub/sub and provides the BlockClient
 	// interface required by relayer components (proxy, relay meter, etc.)
+	// Relayers don't need to query specific blocks, so pass nil for RPC client
 	blockSubscriber := cache.NewRedisBlockClientAdapter(
 		logger,
 		redisBlockSubscriber,
+		nil, // Relayers only need block events, not specific block queries
 	)
 	if err := blockSubscriber.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start block client adapter: %w", err)
@@ -614,6 +633,38 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 				signerAdapter,
 				ringClient, // Enable relay request signature verification
 			)
+			// Wire up the difficulty provider using on-chain service difficulty data
+			difficultyProviderAdapter := &serviceDifficultyQueryAdapter{queryClient: queryClients.Service()}
+			difficultyProvider := relayer.NewCachedDifficultyProvider(logger, difficultyProviderAdapter)
+			relayProcessor.SetDifficultyProvider(difficultyProvider)
+
+			// Subscribe to block events to invalidate difficulty cache on every block
+			// This ensures we always use current difficulty (even though blockchain has bug #1789)
+			// Buffer size: 2000 blocks (matches other block subscribers; prevents lag under load)
+			blockEventCh := blockSubscriber.Subscribe(ctx, 2000)
+			go func() {
+				difficultyLogger := logger.With().Str("component", "difficulty_invalidator").Logger()
+				for {
+					select {
+					case <-ctx.Done():
+						difficultyLogger.Debug().Msg("difficulty cache invalidator stopped")
+						return
+					case event, ok := <-blockEventCh:
+						if !ok {
+							difficultyLogger.Warn().Msg("block event channel closed")
+							return
+						}
+						// Invalidate ALL difficulty caches on every block
+						// Difficulty can change any block (when claims settle in EndBlocker)
+						difficultyProvider.InvalidateAllCache()
+						difficultyLogger.Debug().
+							Int64("height", event.Height()).
+							Msg("invalidated difficulty cache on new block")
+					}
+				}
+			}()
+			logger.Info().Msg("difficulty cache invalidator started (invalidates on every block)")
+
 			// Wire up the service compute units provider using on-chain service data
 			computeUnitsProvider := relayer.NewCachedServiceComputeUnitsProvider(logger, queryClients.Service())
 			// Preload compute units for configured services

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -30,7 +31,8 @@ type Config struct {
 	GRPCPort          int     `yaml:"grpc_port"`
 	MetricsPort       int     `yaml:"metrics_port"`
 	ErrorRate         float64 `yaml:"error_rate"`         // 0.0-1.0
-	ErrorCode         int     `yaml:"error_code"`         // HTTP error code to inject
+	ErrorCode         int     `yaml:"error_code"`         // HTTP error code to inject (legacy, use error_codes)
+	ErrorCodes        []int   `yaml:"error_codes"`        // List of HTTP error codes to randomly inject
 	DelayMs           int     `yaml:"delay_ms"`           // Delay in milliseconds
 	BrokenCompression bool    `yaml:"broken_compression"` // Compress WITHOUT Content-Encoding header (simulate bug)
 }
@@ -81,11 +83,17 @@ func loadConfig() *Config {
 		MetricsPort: 9095,
 		ErrorRate:   0.0,
 		ErrorCode:   500,
+		ErrorCodes:  []int{},
 		DelayMs:     0,
 	}
 
 	if data, err := os.ReadFile("config.yaml"); err == nil {
 		_ = yaml.Unmarshal(data, cfg)
+	}
+
+	// If error_codes is not specified but error_code is, use error_code as the single error code
+	if len(cfg.ErrorCodes) == 0 && cfg.ErrorCode != 0 {
+		cfg.ErrorCodes = []int{cfg.ErrorCode}
 	}
 
 	return cfg
@@ -172,8 +180,10 @@ func handleJSONRPC(cfg *Config) http.HandlerFunc {
 
 		// Inject error if configured
 		if shouldInjectError(cfg.ErrorRate) {
+			errorCode := getRandomErrorCode(cfg.ErrorCodes)
 			requestsTotal.WithLabelValues("http", "error").Inc()
-			http.Error(w, fmt.Sprintf("injected error (code: %d)", cfg.ErrorCode), cfg.ErrorCode)
+			http.Error(w, fmt.Sprintf("injected error (code: %d)", errorCode), errorCode)
+			log.Printf("[ERROR_INJECTION] Returning error code: %d", errorCode)
 			return
 		}
 
@@ -464,5 +474,15 @@ func startGRPCServer(cfg *Config) {
 // Helper functions
 
 func shouldInjectError(rate float64) bool {
-	return false // Simplified: no random errors for now
+	if rate <= 0 {
+		return false
+	}
+	return rand.Float64() < rate
+}
+
+func getRandomErrorCode(errorCodes []int) int {
+	if len(errorCodes) == 0 {
+		return 500 // Default to 500 if no codes specified
+	}
+	return errorCodes[rand.Intn(len(errorCodes))]
 }

@@ -297,15 +297,25 @@ func (bs *BlockSubscriber) handleBlockEvent(resultEvent *coretypes.ResultEvent) 
 		return fmt.Errorf("expected EventDataNewBlockHeader, got %T", resultEvent.Data)
 	}
 
-	// Extract height, hash, and timestamp
 	height := blockHeader.Header.Height
-	hash := blockHeader.Header.Hash()
 	timestamp := blockHeader.Header.Time
 
-	// Create a new block (simple enough with what we need)
+	// CRITICAL: We must query the full block to get BlockID.Hash (canonical block ID)
+	// EventDataNewBlockHeader only has Header.Hash() which is computed, not canonical
+	// The canonical BlockID.Hash must match what validator stores in ctx.HeaderHash()
+	// See: poktroll/x/session/keeper/keeper.go:82
+	ctx, cancel := context.WithTimeout(context.Background(), bs.config.QueryTimeout)
+	defer cancel()
+
+	result, err := bs.cometClient.Block(ctx, &height)
+	if err != nil {
+		return fmt.Errorf("failed to query block %d for canonical hash: %w", height, err)
+	}
+
+	// Create a new block using canonical BlockID.Hash
 	block := &SimpleBlock{
 		height:    height,
-		hash:      hash,
+		hash:      result.BlockID.Hash,
 		timestamp: timestamp,
 	}
 
@@ -453,9 +463,12 @@ func (bs *BlockSubscriber) fetchLatestBlock(ctx context.Context) error {
 		return fmt.Errorf("failed to query block: %w", err)
 	}
 
+	// CRITICAL: Use BlockID.Hash (canonical block ID) instead of Block.Hash() (computed hash)
+	// This must match what the validator stores in ctx.HeaderHash() via StoreBlockHash()
+	// See: poktroll/x/session/keeper/keeper.go:82
 	block := &SimpleBlock{
 		height:    result.Block.Height,
-		hash:      result.Block.Hash(),
+		hash:      result.BlockID.Hash,
 		timestamp: result.Block.Time,
 	}
 
@@ -484,6 +497,30 @@ func (bs *BlockSubscriber) LastBlock(ctx context.Context) client.Block {
 	return block
 }
 
+// GetBlockAtHeight queries the blockchain for a specific block by height.
+// This is CRITICAL for proof generation - the validator uses the exact block at a specific
+// height, so we must query that exact block, not just wait for it and return LastBlock().
+//
+// IMPORTANT: Uses BlockID.Hash (canonical block identifier) instead of Block.Hash() (computed hash).
+// This must match what the validator stores via ctx.HeaderHash() in StoreBlockHash().
+func (bs *BlockSubscriber) GetBlockAtHeight(ctx context.Context, height int64) (client.Block, error) {
+	result, err := bs.cometClient.Block(ctx, &height)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query block at height %d: %w", height, err)
+	}
+
+	// CRITICAL: Use BlockID.Hash (canonical block ID) instead of Block.Hash() (computed hash)
+	// This must match what the validator stores in ctx.HeaderHash() via StoreBlockHash()
+	// See: poktroll/x/session/keeper/keeper.go:82
+	block := &SimpleBlock{
+		height:    result.Block.Height,
+		hash:      result.BlockID.Hash, // ✅ Canonical hash
+		timestamp: result.Block.Time,
+	}
+
+	return block, nil
+}
+
 // CommittedBlocksSequence returns nil - not used in production.
 //
 // This method exists solely for poktroll client.BlockClient interface compliance.
@@ -508,6 +545,12 @@ func (bs *BlockSubscriber) CommittedBlocksSequence(_ context.Context) client.Blo
 // Used by: Tests only (never called in production code)
 func (bs *BlockSubscriber) GetChainVersion() *version.Version {
 	return nil
+}
+
+// GetRPCClient returns the underlying CometBFT RPC client.
+// This allows reusing the same RPC connection for additional queries (like BlockResults).
+func (bs *BlockSubscriber) GetRPCClient() *http.HTTP {
+	return bs.cometClient
 }
 
 // GetChainID fetches the chain ID from the node.

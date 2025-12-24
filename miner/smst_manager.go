@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -29,7 +30,10 @@ type redisSMST struct {
 	sessionID      string
 	trie           smt.SparseMerkleSumTrie
 	store          kvstore.MapStore
-	claimedRoot    []byte
+	sealing        bool   // Set to true when seal process starts (blocks all new updates)
+	claimedRoot    []byte // Set after sealing completes and root is verified stable
+	claimedCount   uint64 // Cached count after flush (for HA warmup)
+	claimedSum     uint64 // Cached sum after flush (for HA warmup)
 	proofPath      []byte
 	compactProofBz []byte
 	mu             sync.Mutex
@@ -102,6 +106,11 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 	tree.mu.Lock()
 	defer tree.mu.Unlock()
 
+	// CRITICAL: Reject updates if session is sealing or already claimed
+	// The sealing flag prevents race conditions during claim window
+	if tree.sealing {
+		return fmt.Errorf("session %s is sealing for claim, cannot update", sessionID)
+	}
 	if tree.claimedRoot != nil {
 		return fmt.Errorf("session %s has already been claimed, cannot update", sessionID)
 	}
@@ -109,6 +118,13 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 	if err := tree.trie.Update(key, value, weight); err != nil {
 		return fmt.Errorf("failed to update SMST: %w", err)
 	}
+
+	// CRITICAL: Log successful SMST update for debugging
+	m.logger.Debug().
+		Str(logging.FieldSessionID, sessionID).
+		Uint64("weight", weight).
+		Int("key_len", len(key)).
+		Msg("SMST updated with relay")
 
 	// Enable pipelining to batch Set() operations during Commit()
 	// This reduces 10-20 Redis round trips (20-40ms) to a single HSET (2-3ms)
@@ -146,6 +162,7 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 
 // FlushTree flushes the SMST for a session and returns the root hash.
 // After flushing, no more updates can be made to the tree.
+// Uses two-phase sealing to prevent race conditions with late relays.
 func (m *RedisSMSTManager) FlushTree(ctx context.Context, sessionID string) (rootHash []byte, err error) {
 	m.treesMu.RLock()
 	tree, exists := m.trees[sessionID]
@@ -159,13 +176,85 @@ func (m *RedisSMSTManager) FlushTree(ctx context.Context, sessionID string) (roo
 	defer tree.mu.Unlock()
 
 	if tree.claimedRoot == nil {
-		tree.claimedRoot = tree.trie.Root()
+		// CRITICAL: Two-phase seal to prevent race conditions with late relays
+		// Phase 1: SEAL FIRST - set flag to block new updates (while holding lock)
+		tree.sealing = true
+
+		// Phase 2: READ initial state (after seal is active)
+		rootAfterSeal := tree.trie.Root()
+		countAfterSeal := tree.trie.MustCount()
+		sumAfterSeal := tree.trie.MustSum()
+
+		m.logger.Debug().
+			Str(logging.FieldSessionID, sessionID).
+			Str("sealed_root_initial_hex", fmt.Sprintf("%x", rootAfterSeal)).
+			Uint64("count", countAfterSeal).
+			Uint64("sum", sumAfterSeal).
+			Msg("seal activated - captured initial state")
+
+		// Phase 3: WAIT - release lock briefly to allow in-flight UpdateTree calls to complete
+		// Any relay that was already inside UpdateTree (passed sealing check) will finish.
+		// Any new relay will be rejected by the sealing flag.
+		tree.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+		tree.mu.Lock()
+
+		// Phase 4: VERIFY - re-read and ensure nothing changed during wait
+		rootAfterWait := tree.trie.Root()
+		countAfterWait := tree.trie.MustCount()
+		sumAfterWait := tree.trie.MustSum()
+
+		if !bytes.Equal(rootAfterSeal, rootAfterWait) {
+			m.logger.Error().
+				Str(logging.FieldSessionID, sessionID).
+				Str("root_after_seal_hex", fmt.Sprintf("%x", rootAfterSeal)).
+				Str("root_after_wait_hex", fmt.Sprintf("%x", rootAfterWait)).
+				Uint64("count_after_seal", countAfterSeal).
+				Uint64("count_after_wait", countAfterWait).
+				Uint64("sum_after_seal", sumAfterSeal).
+				Uint64("sum_after_wait", sumAfterWait).
+				Msg("SEAL RACE DETECTED: root changed after seal - in-flight relay completed during wait!")
+			return nil, fmt.Errorf("session %s: root changed after seal (sealed=%x, after_wait=%x) - in-flight relay modified tree",
+				sessionID, rootAfterSeal, rootAfterWait)
+		}
+
+		m.logger.Debug().
+			Str(logging.FieldSessionID, sessionID).
+			Str("verified_root_hex", fmt.Sprintf("%x", rootAfterWait)).
+			Msg("seal verified - root stable after wait, no in-flight relays")
+
+		// Phase 5: Seal complete - save verified stable root
+		tree.claimedRoot = rootAfterWait
+		tree.claimedCount = countAfterWait
+		tree.claimedSum = sumAfterWait
 	}
 
-	m.logger.Debug().
+	// Store the claimed root in Redis for HA failover recovery
+	rootKey := m.redisClient.KB().SMSTRootKey(sessionID)
+	if err := m.redisClient.Set(ctx, rootKey, tree.claimedRoot, 0).Err(); err != nil {
+		m.logger.Warn().
+			Err(err).
+			Str(logging.FieldSessionID, sessionID).
+			Msg("failed to store claimed root in Redis (non-fatal)")
+		// Continue anyway - root is in memory
+	}
+
+	// Store count and sum in Redis for HA warmup
+	statsKey := m.redisClient.KB().SMSTStatsKey(sessionID)
+	statsValue := fmt.Sprintf("%d:%d", tree.claimedCount, tree.claimedSum)
+	if err := m.redisClient.Set(ctx, statsKey, statsValue, 0).Err(); err != nil {
+		m.logger.Warn().
+			Err(err).
+			Str(logging.FieldSessionID, sessionID).
+			Msg("failed to store tree stats in Redis (non-fatal)")
+	}
+
+	// CRITICAL: Log SMST root hash in hex for debugging invalid proofs
+	m.logger.Info().
 		Str(logging.FieldSessionID, sessionID).
+		Str("root_hash_hex", fmt.Sprintf("%x", tree.claimedRoot)).
 		Int("root_hash_len", len(tree.claimedRoot)).
-		Msg("flushed SMST")
+		Msg("flushed SMST - root hash ready for claim")
 
 	return tree.claimedRoot, nil
 }
@@ -209,6 +298,19 @@ func (m *RedisSMSTManager) ProveClosest(ctx context.Context, sessionID string, p
 		return nil, fmt.Errorf("session %s has not been claimed yet", sessionID)
 	}
 
+	// CRITICAL: Verify current tree root matches claimed root
+	// If they don't match, proof will be invalid
+	currentRoot := tree.trie.Root()
+	if !bytes.Equal(currentRoot, tree.claimedRoot) {
+		m.logger.Error().
+			Str(logging.FieldSessionID, sessionID).
+			Str("claimed_root_hex", fmt.Sprintf("%x", tree.claimedRoot)).
+			Str("current_root_hex", fmt.Sprintf("%x", currentRoot)).
+			Msg("ROOT MISMATCH: current tree root != claimed root - proof will be INVALID!")
+		return nil, fmt.Errorf("session %s: current root (%x) does not match claimed root (%x) - tree was modified after sealing",
+			sessionID, currentRoot, tree.claimedRoot)
+	}
+
 	// Generate the proof
 	proof, err := tree.trie.ProveClosest(path)
 	if err != nil {
@@ -231,21 +333,33 @@ func (m *RedisSMSTManager) ProveClosest(ctx context.Context, sessionID string, p
 	tree.proofPath = path
 	tree.compactProofBz = proofBz
 
-	m.logger.Debug().
+	// CRITICAL: Log proof details for debugging invalid proofs
+	m.logger.Info().
 		Str(logging.FieldSessionID, sessionID).
+		Str("proof_path_hex", fmt.Sprintf("%x", path)).
+		Str("claimed_root_hex", fmt.Sprintf("%x", tree.claimedRoot)).
 		Int("proof_len", len(proofBz)).
-		Msg("generated proof")
+		Msg("generated proof - verify this matches on-chain claim root")
 
 	return proofBz, nil
 }
 
-// SetTreeTTL sets a TTL on the Redis SMST hash for a session.
+// SetTreeTTL sets a TTL on the Redis SMST hash, root, and stats for a session.
 // This is called after successful settlement to ensure cleanup without losing proof data prematurely.
 func (m *RedisSMSTManager) SetTreeTTL(ctx context.Context, sessionID string, ttl time.Duration) error {
 	hashKey := m.redisClient.KB().SMSTNodesKey(sessionID)
+	rootKey := m.redisClient.KB().SMSTRootKey(sessionID)
+	statsKey := m.redisClient.KB().SMSTStatsKey(sessionID)
 
+	// Set TTL on nodes hash, root, and stats
 	if err := m.redisClient.Expire(ctx, hashKey, ttl).Err(); err != nil {
-		return fmt.Errorf("failed to set TTL on SMST: %w", err)
+		return fmt.Errorf("failed to set TTL on SMST nodes: %w", err)
+	}
+	if err := m.redisClient.Expire(ctx, rootKey, ttl).Err(); err != nil {
+		return fmt.Errorf("failed to set TTL on SMST root: %w", err)
+	}
+	if err := m.redisClient.Expire(ctx, statsKey, ttl).Err(); err != nil {
+		return fmt.Errorf("failed to set TTL on SMST stats: %w", err)
 	}
 
 	m.logger.Debug().
@@ -264,9 +378,11 @@ func (m *RedisSMSTManager) DeleteTree(ctx context.Context, sessionID string) err
 	// Remove from memory
 	delete(m.trees, sessionID)
 
-	// Remove from Redis
+	// Remove nodes hash, root, and stats from Redis
 	hashKey := m.redisClient.KB().SMSTNodesKey(sessionID)
-	if err := m.redisClient.Del(ctx, hashKey).Err(); err != nil {
+	rootKey := m.redisClient.KB().SMSTRootKey(sessionID)
+	statsKey := m.redisClient.KB().SMSTStatsKey(sessionID)
+	if err := m.redisClient.Del(ctx, hashKey, rootKey, statsKey).Err(); err != nil {
 		m.logger.Warn().
 			Err(err).
 			Str(logging.FieldSessionID, sessionID).
@@ -332,6 +448,38 @@ func (m *RedisSMSTManager) WarmupFromRedis(ctx context.Context) (int, error) {
 				store:     store,
 			}
 
+			// Restore the claimed root from Redis if it exists
+			rootKey := m.redisClient.KB().SMSTRootKey(sessionID)
+			rootBytes, err := m.redisClient.Get(ctx, rootKey).Bytes()
+			if err == nil && len(rootBytes) > 0 {
+				tree.claimedRoot = rootBytes
+				m.logger.Debug().
+					Str(logging.FieldSessionID, sessionID).
+					Str("root_hash_hex", fmt.Sprintf("%x", rootBytes)).
+					Msg("restored claimed root from Redis")
+
+				// Restore count and sum from Redis
+				statsKey := m.redisClient.KB().SMSTStatsKey(sessionID)
+				statsValue, statsErr := m.redisClient.Get(ctx, statsKey).Result()
+				if statsErr == nil {
+					var count, sum uint64
+					if _, parseErr := fmt.Sscanf(statsValue, "%d:%d", &count, &sum); parseErr == nil {
+						tree.claimedCount = count
+						tree.claimedSum = sum
+						m.logger.Debug().
+							Str(logging.FieldSessionID, sessionID).
+							Uint64("count", count).
+							Uint64("sum", sum).
+							Msg("restored tree stats from Redis")
+					}
+				}
+			} else if err != nil {
+				m.logger.Debug().
+					Err(err).
+					Str(logging.FieldSessionID, sessionID).
+					Msg("no claimed root found in Redis (tree not yet flushed)")
+			}
+
 			m.treesMu.Lock()
 			m.trees[sessionID] = tree
 			m.treesMu.Unlock()
@@ -357,6 +505,8 @@ func (m *RedisSMSTManager) WarmupFromRedis(ctx context.Context) (int, error) {
 }
 
 // GetTreeStats returns statistics for a session tree.
+// If the tree has been flushed, returns cached values from the claimed root.
+// Otherwise, queries the trie directly.
 func (m *RedisSMSTManager) GetTreeStats(sessionID string) (count uint64, sum uint64, err error) {
 	m.treesMu.RLock()
 	tree, exists := m.trees[sessionID]
@@ -369,6 +519,12 @@ func (m *RedisSMSTManager) GetTreeStats(sessionID string) (count uint64, sum uin
 	tree.mu.Lock()
 	defer tree.mu.Unlock()
 
+	// If tree has been flushed, use cached values (works after HA warmup)
+	if tree.claimedRoot != nil {
+		return tree.claimedCount, tree.claimedSum, nil
+	}
+
+	// Otherwise query the trie directly
 	count = tree.trie.MustCount()
 	sum = tree.trie.MustSum()
 

@@ -61,6 +61,11 @@ test: ## Run tests (PKG=package_name for specific package, VERBOSE=1 for verbose
 		go test $(if $(VERBOSE),-v) -tags test -p 4 -parallel 4 ./...; \
 	fi
 
+test_miner: ## Run miner tests exclusively with race detection (Rule #1: no flakes, no races, no mocks)
+	@echo "Running miner tests with race detection..."
+	@echo "Rule #1: No flaky tests, no race conditions, no timeout weird tests, no mocks"
+	@go test -v -tags test -race -count=1 -p 1 -parallel 1 ./miner/...
+
 test-coverage: ## Run tests with coverage (use PKG=package for specific package)
 	@echo "Running tests with coverage..."
 ifdef PKG

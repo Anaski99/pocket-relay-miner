@@ -75,20 +75,12 @@ keys:
 # Each has 15 suppliers staked for it.
 services:
   # HTTP/JSON-RPC service (localnet)
-  # Two backends available:
-  #   - nginx: High-throughput static response (50k+ RPS, for load testing)
-  #   - jsonrpc: Full-featured demo backend (lower throughput, realistic responses)
   develop-http:
     validation_mode: eager
     timeout_profile: fast
     max_body_size_bytes: 10485760  # 10MB
     default_backend: jsonrpc  # Use jsonrpc for proper protocol labeling (nginx backend still available)
     backends:
-      # High-throughput nginx backend - static JSON-RPC response
-      # Returns: {"jsonrpc":"2.0","id":1,"result":"0x1"}
-      # Use for: Load testing, benchmarking relay throughput
-      nginx:
-        url: "http://nginx-backend:80"
       # Full-featured demo backend - dynamic responses
       # Use for: Feature testing, WebSocket, gRPC, streaming
       jsonrpc:

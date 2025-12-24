@@ -219,13 +219,9 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	}
 	defer func() { globalLeader.Close() }()
 
-	// Determine initial replica status and add to logger context
-	// This status is checked once at startup - callbacks handle dynamic changes
-	replicaStatus := logging.ReplicaStandby
-	if globalLeader.IsLeader() {
-		replicaStatus = logging.ReplicaLeader
-	}
-	logger = logging.ForMiner(logger, instanceID, replicaStatus)
+	// Use dynamic logger that evaluates replica status at log time
+	// The replica field will automatically reflect leader election changes
+	logger = logging.ForMinerDynamic(logger, instanceID, globalLeader)
 	logger.Info().Msg("miner context initialized")
 
 	// Start SupplierWorker for ALL miners
@@ -237,6 +233,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		RedisClient:      redisClient,
 		KeyManager:       keyManager,
 		Config:           config,
+		QueryNodeRPCUrl:  config.PocketNode.QueryNodeRPCUrl,
 		QueryNodeGRPCUrl: config.PocketNode.QueryNodeGRPCUrl,
 		GRPCInsecure:     config.PocketNode.GRPCInsecure,
 		ChainID:          "", // Will be fetched from blockchain or use default

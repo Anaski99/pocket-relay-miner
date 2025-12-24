@@ -974,6 +974,9 @@ func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *Supplie
 				return
 			}
 
+			// Track relay consumed from Redis Stream (relayer → miner)
+			RecordRelayConsumedFromStream(state.OperatorAddr, msg.Message.ServiceId)
+
 			// When draining, we continue processing existing messages
 			// but log that we're in drain mode for visibility
 			if state.Status == SupplierStatusDraining {

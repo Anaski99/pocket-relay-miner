@@ -2,7 +2,6 @@ package relayer
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -157,27 +156,25 @@ func (rv *relayValidator) ValidateRelayRequest(
 	for _, supplier := range session.Suppliers {
 		if supplier.OperatorAddress == supplierAddr {
 			supplierFound = true
-			bytes, _ := json.Marshal(session)
 			rv.logger.Info().
 				Str("supplier", supplier.OperatorAddress).
 				Str("session_id", session.SessionId).
 				Str("service_id", serviceID).
+				Str("application", appAddress).
 				Int64("session_height", sessionBlockHeight).
 				Int64("current_height", currentHeight).
-				Str("raw", string(bytes)).
 				Msg("supplier found in session")
 			break
 		}
 	}
 	if !supplierFound {
-		bytes, _ := json.Marshal(session)
 		rv.logger.Info().
 			Str("supplier", supplierAddr).
+			Str("application", appAddress).
 			Str("session_id", session.SessionId).
 			Str("service_id", serviceID).
 			Int64("session_height", sessionBlockHeight).
 			Int64("current_height", currentHeight).
-			Str("raw", string(bytes)).
 			Msg("supplier not found in session")
 		return fmt.Errorf("supplier %s not found in session", supplierAddr)
 	}

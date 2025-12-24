@@ -179,19 +179,6 @@ func (lc *LifecycleCallback) SetStreamDeleter(deleter StreamDeleter) {
 	lc.streamDeleter = deleter
 }
 
-// getSessionLock returns a per-session lock.
-func (lc *LifecycleCallback) getSessionLock(sessionID string) *sync.Mutex {
-	lc.sessionLocksMu.Lock()
-	defer lc.sessionLocksMu.Unlock()
-
-	lock, exists := lc.sessionLocks[sessionID]
-	if !exists {
-		lock = &sync.Mutex{}
-		lc.sessionLocks[sessionID] = lock
-	}
-	return lock
-}
-
 // removeSessionLock removes a per-session lock.
 func (lc *LifecycleCallback) removeSessionLock(sessionID string) {
 	lc.sessionLocksMu.Lock()
@@ -746,151 +733,6 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 	return allRootHashes, nil
 }
 
-// OnSessionNeedsClaim is DEPRECATED - use OnSessionsNeedClaim instead.
-// Kept for backward compatibility with old code paths.
-func (lc *LifecycleCallback) OnSessionNeedsClaim(ctx context.Context, snapshot *SessionSnapshot) (rootHash []byte, err error) {
-	lock := lc.getSessionLock(snapshot.SessionID)
-	lock.Lock()
-	defer lock.Unlock()
-
-	logger := lc.logger.With().Str(logging.FieldSessionID, snapshot.SessionID).Int64(logging.FieldSessionEndHeight, snapshot.SessionEndHeight).Logger()
-
-	logger.Debug().
-		Int64(logging.FieldCount, snapshot.RelayCount).
-		Msg("session needs claim - starting claim process")
-
-	// CRITICAL: Deduplication check - never submit the same claim twice
-	if snapshot.ClaimTxHash != "" {
-		logger.Warn().
-			Str(logging.FieldSessionID, snapshot.SessionID).
-			Str("existing_claim_tx_hash", snapshot.ClaimTxHash).
-			Msg("skipping claim - already submitted for this session (deduplication)")
-		return nil, fmt.Errorf("claim already submitted for session %s (tx_hash: %s)", snapshot.SessionID, snapshot.ClaimTxHash)
-	}
-
-	// Get shared params
-	sharedParams, err := lc.sharedClient.GetParams(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get shared params: %w", err)
-	}
-
-	// Wait for claim window to open and get the block hash for timing spread
-	claimWindowOpenHeight := sharedtypes.GetClaimWindowOpenHeight(sharedParams, snapshot.SessionEndHeight)
-	logger.Debug().
-		Int64("claim_window_open_height", claimWindowOpenHeight).
-		Msg("waiting for claim window to open")
-
-	if _, err := lc.waitForBlock(ctx, claimWindowOpenHeight); err != nil {
-		return nil, fmt.Errorf("failed to wait for claim window open: %w", err)
-	}
-
-	// Calculate the earliest claim commit height for this supplier (timing spread)
-	// Use interface method - block hash not needed since poktroll ignores it currently
-	earliestClaimHeight, err := lc.sharedClient.GetEarliestSupplierClaimCommitHeight(
-		ctx,
-		snapshot.SessionEndHeight,
-		snapshot.SupplierOperatorAddress,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to calculate earliest claim height: %w", err)
-	}
-
-	// Record the scheduled claim height for operators
-	SetClaimScheduledHeight(snapshot.SupplierOperatorAddress, snapshot.SessionID, float64(earliestClaimHeight))
-
-	logger.Debug().
-		Int64("earliest_claim_height", earliestClaimHeight).
-		Msg("waiting for assigned claim timing")
-
-	// Wait for the earliest claim height (timing spread ensures suppliers don't all submit at once)
-	if _, err := lc.waitForBlock(ctx, earliestClaimHeight); err != nil {
-		return nil, fmt.Errorf("failed to wait for claim timing: %w", err)
-	}
-
-	logger.Debug().Msg("claim window timing reached - flushing SMST and submitting claim")
-
-	// Flush the SMST to get the root hash
-	rootHash, err = lc.smstManager.FlushTree(ctx, snapshot.SessionID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to flush SMST: %w", err)
-	}
-
-	// Build the session header
-	sessionHeader, err := lc.buildSessionHeader(ctx, snapshot)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build session header: %w", err)
-	}
-
-	// Calculate timeout height (claim window close)
-	claimWindowClose := sharedtypes.GetClaimWindowCloseHeight(sharedParams, snapshot.SessionEndHeight)
-
-	// Build and submit the claim with retries
-	claimMsg := &prooftypes.MsgCreateClaim{
-		SupplierOperatorAddress: snapshot.SupplierOperatorAddress,
-		SessionHeader:           sessionHeader,
-		RootHash:                rootHash,
-	}
-
-	var lastErr error
-	for attempt := 1; attempt <= lc.config.ClaimRetryAttempts; attempt++ {
-		err := lc.supplierClient.CreateClaims(ctx, claimWindowClose, claimMsg)
-		if err != nil {
-			lastErr = err
-			logger.Warn().
-				Err(err).
-				Int(logging.FieldAttempt, attempt).
-				Int(logging.FieldMaxRetry, lc.config.ClaimRetryAttempts).
-				Msg("claim submission failed, retrying")
-
-			if attempt < lc.config.ClaimRetryAttempts {
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(lc.config.ClaimRetryDelay):
-					continue
-				}
-			}
-		} else {
-			// SUCCESS: Claim TX broadcast accepted to mempool
-			// Retrieve TX hash from HA client (stored immediately after broadcast)
-			var txHash string
-			if haClient, ok := lc.supplierClient.(*tx.HASupplierClient); ok {
-				txHash = haClient.GetLastClaimTxHash()
-			}
-
-			currentBlock := lc.blockClient.LastBlock(ctx)
-			blocksAfterWindowOpen := float64(currentBlock.Height() - claimWindowOpenHeight)
-
-			// CRITICAL: Save TX hash to Redis IMMEDIATELY (1 line after broadcast)
-			// This prevents duplicate submissions if we crash after TX broadcast
-			if lc.sessionCoordinator != nil {
-				if updateErr := lc.sessionCoordinator.OnSessionClaimed(ctx, snapshot.SessionID, rootHash, txHash); updateErr != nil {
-					logger.Warn().
-						Err(updateErr).
-						Str("claim_tx_hash", txHash).
-						Msg("failed to update snapshot after claim")
-				}
-			}
-
-			RecordClaimSubmitted(snapshot.SupplierOperatorAddress)
-			RecordClaimSubmissionLatency(snapshot.SupplierOperatorAddress, blocksAfterWindowOpen)
-			RecordRevenueClaimed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
-
-			logger.Info().
-				Int("root_hash_len", len(rootHash)).
-				Str("claim_tx_hash", txHash).
-				Int64("blocks_after_window", int64(blocksAfterWindowOpen)).
-				Msg("claim submitted successfully")
-
-			return rootHash, nil
-		}
-	}
-
-	RecordClaimError(snapshot.SupplierOperatorAddress, "exhausted_retries")
-	RecordRevenueLost(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "claim_exhausted_retries", snapshot.TotalComputeUnits, snapshot.RelayCount)
-	return nil, fmt.Errorf("claim submission failed after %d attempts: %w", lc.config.ClaimRetryAttempts, lastErr)
-}
-
 // OnSessionsNeedProof is called when sessions need proofs submitted (batched).
 // It waits for the proper timing spread, generates proofs, and submits all proofs in a single transaction.
 func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots []*SessionSnapshot) error {
@@ -1002,6 +844,11 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			return fmt.Errorf("failed to wait for proof path seed block: %w", seedErr)
 		}
 
+		logger.Debug().
+			Int64("proof_path_seed_block_height", proofPathSeedBlockHeight).
+			Str("proof_path_seed_block_hash", fmt.Sprintf("%x", proofPathSeedBlock.Hash())).
+			Msg("obtained proof path seed block hash")
+
 		// CRITICAL: Verify proof window is still open before proceeding
 		// This prevents wasting fees on proofs that will be rejected
 		proofWindowClose := sharedtypes.GetProofWindowCloseHeight(sharedParams, sessionEndHeight)
@@ -1032,6 +879,44 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			}
 
 			return fmt.Errorf("proof window already closed at height %d (current: %d)", proofWindowClose, currentBlock.Height())
+		}
+
+		// CRITICAL: Re-check proof requirement RIGHT before building proofs
+		// Between initial check (at proof window open) and now (at earliestProofHeight),
+		// the blockchain might have already settled claims without requiring proofs.
+		// This prevents wasting gas on simulation failures.
+		if lc.proofChecker != nil {
+			stillNeedingProof := make([]*SessionSnapshot, 0, len(sessionsNeedingProof))
+			for _, snapshot := range sessionsNeedingProof {
+				required, recheckErr := lc.proofChecker.IsProofRequired(ctx, snapshot, proofPathSeedBlock.Hash())
+				if recheckErr != nil {
+					// Error checking - err on side of caution and submit anyway
+					logger.Warn().
+						Err(recheckErr).
+						Str("session_id", snapshot.SessionID).
+						Msg("failed to re-check proof requirement before submission, will attempt submission anyway")
+					stillNeedingProof = append(stillNeedingProof, snapshot)
+				} else if !required {
+					// Proof NO LONGER required - blockchain already settled without proof
+					logger.Info().
+						Str("session_id", snapshot.SessionID).
+						Msg("proof no longer required (blockchain settled claim without proof) - skipping proof submission")
+					RecordRevenueProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
+				} else {
+					// Still required - proceed with proof
+					stillNeedingProof = append(stillNeedingProof, snapshot)
+				}
+			}
+
+			if len(stillNeedingProof) == 0 {
+				logger.Info().
+					Int64("session_end_height", sessionEndHeight).
+					Msg("no proofs required after re-check (all claims settled without proof)")
+				continue // Skip to next group
+			}
+
+			// Update the list to only include sessions that still need proofs
+			sessionsNeedingProof = stillNeedingProof
 		}
 
 		logger.Debug().
@@ -1073,6 +958,13 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 
 				// Generate the proof path from the seed block hash
 				path := protocol.GetPathForProof(proofPathSeedBlock.Hash(), snap.SessionID)
+
+				lc.logger.Info().
+					Str("session_id", snap.SessionID).
+					Str("block_hash_from_blockid", fmt.Sprintf("%x", proofPathSeedBlock.Hash())).
+					Str("proof_path_computed", fmt.Sprintf("%x", path)).
+					Int64("block_height", proofPathSeedBlockHeight).
+					Msg("DEBUG: proof path computation (using BlockID.Hash)")
 
 				// Generate the proof (CPU-bound cryptographic operation, can parallelize)
 				proofBytes, proofErr := lc.smstManager.ProveClosest(ctx, snap.SessionID, path)
@@ -1268,179 +1160,6 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 	return nil
 }
 
-// OnSessionNeedsProof is DEPRECATED - use OnSessionsNeedProof instead.
-// Kept for backward compatibility with old code paths.
-func (lc *LifecycleCallback) OnSessionNeedsProof(ctx context.Context, snapshot *SessionSnapshot) error {
-	lock := lc.getSessionLock(snapshot.SessionID)
-	lock.Lock()
-	defer lock.Unlock()
-
-	logger := lc.logger.With().Str(logging.FieldSessionID, snapshot.SessionID).Int64(logging.FieldSessionEndHeight, snapshot.SessionEndHeight).Logger()
-
-	logger.Debug().Msg("session needs proof - starting proof process")
-
-	// CRITICAL: Deduplication check - never submit the same proof twice
-	if snapshot.ProofTxHash != "" {
-		logger.Warn().
-			Str(logging.FieldSessionID, snapshot.SessionID).
-			Str("existing_proof_tx_hash", snapshot.ProofTxHash).
-			Msg("skipping proof - already submitted for this session (deduplication)")
-		return fmt.Errorf("proof already submitted for session %s (tx_hash: %s)", snapshot.SessionID, snapshot.ProofTxHash)
-	}
-
-	// Get shared params
-	sharedParams, err := lc.sharedClient.GetParams(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get shared params: %w", err)
-	}
-
-	// Wait for proof window to open
-	proofWindowOpenHeight := sharedtypes.GetProofWindowOpenHeight(sharedParams, snapshot.SessionEndHeight)
-	logger.Debug().
-		Int64("proof_window_open_height", proofWindowOpenHeight).
-		Msg("waiting for proof window to open")
-
-	proofWindowOpenBlock, err := lc.waitForBlock(ctx, proofWindowOpenHeight)
-	if err != nil {
-		return fmt.Errorf("failed to wait for proof window open: %w", err)
-	}
-
-	// CHECK IF PROOF IS REQUIRED (probabilistic proof selection)
-	// This must be done after the proof window opens, as the block hash is used for the check
-	if lc.proofChecker != nil {
-		required, checkErr := lc.proofChecker.IsProofRequired(ctx, snapshot, proofWindowOpenBlock.Hash())
-		if checkErr != nil {
-			// If we fail to check, err on the side of caution and submit proof anyway
-			// Missing a required proof incurs a 320 POKT penalty!
-			logger.Warn().
-				Err(checkErr).
-				Msg("failed to check proof requirement, submitting proof anyway to avoid potential penalty")
-		} else if !required {
-			// Proof is NOT required - skip proof generation and submission
-			logger.Info().
-				Msg("proof NOT required for this claim (below threshold and not randomly selected) - skipping proof submission")
-
-			// Still record compute units as settled since claim was accepted
-			RecordRevenueProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
-
-			return nil
-		}
-		// If required == true, continue with proof generation and submission
-		logger.Info().Msg("proof IS required for this claim - proceeding with proof generation")
-	}
-
-	// Calculate the earliest proof commit height for this supplier (timing spread)
-	// Use interface method - block hash not needed since poktroll ignores it currently
-	earliestProofHeight, err := lc.sharedClient.GetEarliestSupplierProofCommitHeight(
-		ctx,
-		snapshot.SessionEndHeight,
-		snapshot.SupplierOperatorAddress,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to calculate earliest proof height: %w", err)
-	}
-
-	// Record the scheduled proof height for operators
-	SetProofScheduledHeight(snapshot.SupplierOperatorAddress, snapshot.SessionID, float64(earliestProofHeight))
-
-	logger.Debug().
-		Int64("earliest_proof_height", earliestProofHeight).
-		Msg("waiting for assigned proof timing")
-
-	// Wait for the proof path seed block (one before earliest proof height)
-	proofPathSeedBlockHeight := earliestProofHeight - 1
-	proofPathSeedBlock, err := lc.waitForBlock(ctx, proofPathSeedBlockHeight)
-	if err != nil {
-		return fmt.Errorf("failed to wait for proof path seed block: %w", err)
-	}
-
-	logger.Debug().Msg("proof window timing reached - generating and submitting proof")
-
-	// Generate the proof path from the seed block hash
-	path := protocol.GetPathForProof(proofPathSeedBlock.Hash(), snapshot.SessionID)
-
-	// Generate the proof
-	proofBytes, err := lc.smstManager.ProveClosest(ctx, snapshot.SessionID, path)
-	if err != nil {
-		return fmt.Errorf("failed to generate proof: %w", err)
-	}
-
-	// Build the session header
-	sessionHeader, err := lc.buildSessionHeader(ctx, snapshot)
-	if err != nil {
-		return fmt.Errorf("failed to build session header: %w", err)
-	}
-
-	// Calculate timeout height (proof window close)
-	proofWindowClose := sharedtypes.GetProofWindowCloseHeight(sharedParams, snapshot.SessionEndHeight)
-
-	// Build and submit the proof with retries
-	proofMsg := &prooftypes.MsgSubmitProof{
-		SupplierOperatorAddress: snapshot.SupplierOperatorAddress,
-		SessionHeader:           sessionHeader,
-		Proof:                   proofBytes,
-	}
-
-	var lastErr error
-	for attempt := 1; attempt <= lc.config.ProofRetryAttempts; attempt++ {
-		err := lc.supplierClient.SubmitProofs(ctx, proofWindowClose, proofMsg)
-		if err != nil {
-			lastErr = err
-			logger.Warn().
-				Err(err).
-				Int(logging.FieldAttempt, attempt).
-				Int(logging.FieldMaxRetry, lc.config.ProofRetryAttempts).
-				Msg("proof submission failed, retrying")
-
-			if attempt < lc.config.ProofRetryAttempts {
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(lc.config.ProofRetryDelay):
-					continue
-				}
-			}
-		} else {
-			// SUCCESS: Proof TX broadcast accepted to mempool
-			// Retrieve TX hash from HA client (stored immediately after broadcast)
-			var txHash string
-			if haClient, ok := lc.supplierClient.(*tx.HASupplierClient); ok {
-				txHash = haClient.GetLastProofTxHash()
-			}
-
-			currentBlock := lc.blockClient.LastBlock(ctx)
-			blocksAfterWindowOpen := float64(currentBlock.Height() - proofWindowOpenHeight)
-
-			// CRITICAL: Save TX hash to Redis IMMEDIATELY (1 line after broadcast)
-			// This prevents duplicate submissions if we crash after TX broadcast
-			if lc.sessionCoordinator != nil {
-				if updateErr := lc.sessionCoordinator.OnSessionProved(ctx, snapshot.SessionID, txHash); updateErr != nil {
-					logger.Warn().
-						Err(updateErr).
-						Str("proof_tx_hash", txHash).
-						Msg("failed to update snapshot after proof")
-				}
-			}
-
-			RecordProofSubmitted(snapshot.SupplierOperatorAddress)
-			RecordProofSubmissionLatency(snapshot.SupplierOperatorAddress, blocksAfterWindowOpen)
-			RecordRevenueProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
-
-			logger.Info().
-				Int("proof_len", len(proofBytes)).
-				Str("proof_tx_hash", txHash).
-				Int64("blocks_after_window", int64(blocksAfterWindowOpen)).
-				Msg("proof submitted successfully")
-
-			return nil
-		}
-	}
-
-	RecordProofError(snapshot.SupplierOperatorAddress, "exhausted_retries")
-	RecordRevenueLost(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "proof_exhausted_retries", snapshot.TotalComputeUnits, snapshot.RelayCount)
-	return fmt.Errorf("proof submission failed after %d attempts: %w", lc.config.ProofRetryAttempts, lastErr)
-}
-
 // OnSessionSettled is called when a session is fully settled.
 // It cleans up resources associated with the session.
 func (lc *LifecycleCallback) OnSessionSettled(ctx context.Context, snapshot *SessionSnapshot) error {
@@ -1533,12 +1252,7 @@ func (lc *LifecycleCallback) OnSessionExpired(ctx context.Context, snapshot *Ses
 // AGGRESSIVE: 500ms polling to minimize latency when waiting for windows to open.
 // Claims/proofs = money - we want to detect new blocks as fast as possible.
 func (lc *LifecycleCallback) waitForBlock(ctx context.Context, targetHeight int64) (pocktclient.Block, error) {
-	// Immediate check - don't wait if already at target
-	block := lc.blockClient.LastBlock(ctx)
-	if block.Height() >= targetHeight {
-		return block, nil
-	}
-
+	// Wait until the chain reaches the target height
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -1547,13 +1261,28 @@ func (lc *LifecycleCallback) waitForBlock(ctx context.Context, targetHeight int6
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-ticker.C:
-			block := lc.blockClient.LastBlock(ctx)
-			if block.Height() >= targetHeight {
+			currentBlock := lc.blockClient.LastBlock(ctx)
+			if currentBlock.Height() >= targetHeight {
+				// CRITICAL: Query the SPECIFIC block at targetHeight, not just return LastBlock()
+				// The validator uses the exact block hash at this height for proof validation.
+				// We must query that exact block to get the correct BlockID.Hash.
+				blockSubscriber, ok := lc.blockClient.(interface {
+					GetBlockAtHeight(context.Context, int64) (pocktclient.Block, error)
+				})
+				if !ok {
+					// This should NEVER happen - all BlockClient implementations must support GetBlockAtHeight
+					return nil, fmt.Errorf("BlockClient doesn't support GetBlockAtHeight - proof generation will fail (target_height=%d)", targetHeight)
+				}
+
+				block, err := blockSubscriber.GetBlockAtHeight(ctx, targetHeight)
+				if err != nil {
+					return nil, fmt.Errorf("failed to get block at height %d: %w", targetHeight, err)
+				}
 				return block, nil
 			}
 
 			lc.logger.Debug().
-				Int64("current_height", block.Height()).
+				Int64("current_height", currentBlock.Height()).
 				Int64("target_height", targetHeight).
 				Msg("waiting for block height")
 		}

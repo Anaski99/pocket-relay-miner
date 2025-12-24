@@ -179,10 +179,6 @@ type RedisConfig struct {
 	ClaimIdleTimeoutMs int64 `yaml:"claim_idle_timeout_ms,omitempty"`
 }
 
-// SupplierConfig contains configuration for a single supplier.
-// DEPRECATED: This type is no longer used in production code.
-// Suppliers are auto-discovered from keys configuration.
-// Kept only for legacy test compatibility.
 // TransactionConfig contains configuration for claim/proof transaction submission.
 type TransactionConfig struct {
 	// GasLimit is the gas limit for transactions.
@@ -485,6 +481,11 @@ func DefaultConfig() *Config {
 			Format:          "json",
 			Async:           true,
 			AsyncBufferSize: 100000,
+		},
+		Transaction: TransactionConfig{
+			GasLimit:      0,               // 0 = automatic gas estimation via simulation
+			GasPrice:      "0.000001upokt", // Default gas price
+			GasAdjustment: 1.7,             // Default 70% safety margin
 		},
 		DeduplicationTTLBlocks: 10,
 		BatchSize:              1000, // Increased from 100 for better throughput (10x more efficient)
