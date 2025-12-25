@@ -136,13 +136,8 @@ type SupplierManagerConfig struct {
 	// Subpools will be created from this for different workloads.
 	WorkerPool pond.Pool
 
-	// EnableDistributedClaiming enables distributed supplier claiming across multiple miners.
-	// When enabled, suppliers are claimed via Redis leases and distributed fairly.
-	// When disabled (default), this miner claims all configured suppliers.
-	EnableDistributedClaiming bool
-
 	// ClaimerConfig contains configuration for the SupplierClaimer.
-	// Only used when EnableDistributedClaiming is true.
+	// Used for distributed supplier claiming across multiple miners via Redis leases.
 	ClaimerConfig SupplierClaimerConfig
 }
 
@@ -220,50 +215,8 @@ func (m *SupplierManager) Start(ctx context.Context) error {
 		return nil
 	}
 
-	// Check if distributed claiming is enabled
-	if m.config.EnableDistributedClaiming {
-		return m.startWithDistributedClaiming(ctx, supplierAddrs)
-	}
-
-	// Default: claim all suppliers directly (single miner mode)
-	return m.startWithDirectClaiming(ctx, supplierAddrs)
-}
-
-// startWithDirectClaiming starts the manager with all suppliers claimed directly.
-// This is the default mode when distributed claiming is disabled.
-func (m *SupplierManager) startWithDirectClaiming(ctx context.Context, supplierAddrs []string) error {
-	// Phase 1: Parallel warmup - query all supplier data from chain concurrently
-	startTime := time.Now()
-	supplierData := m.warmupSuppliersParallel(ctx, supplierAddrs)
-	warmupDuration := time.Since(startTime)
-
-	m.logger.Debug().
-		Int("total_suppliers", len(supplierAddrs)).
-		Int("warmed_suppliers", len(supplierData)).
-		Int64("warmup_ms", warmupDuration.Milliseconds()).
-		Msg("parallel supplier warmup complete")
-
-	// Phase 2: Initialize suppliers with pre-fetched data
-	for _, operatorAddr := range supplierAddrs {
-		// Pass pre-fetched data (nil if warmup failed for this supplier)
-		prewarmedData := supplierData[operatorAddr]
-		if err := m.addSupplierWithData(m.ctx, operatorAddr, prewarmedData); err != nil {
-			m.logger.Warn().
-				Err(err).
-				Str(logging.FieldSupplier, operatorAddr).
-				Msg("failed to add supplier on startup")
-		}
-	}
-
-	m.logger.Info().
-		Int("suppliers", len(m.suppliers)).
-		Bool("distributed_claiming", false).
-		Msg("supplier manager started")
-
-	// Check if pool size is sufficient for the number of suppliers
-	m.checkPoolSize(len(supplierAddrs))
-
-	return nil
+	// Start with distributed claiming (ONLY mode - each miner claims fair share via Redis leases)
+	return m.startWithDistributedClaiming(ctx, supplierAddrs)
 }
 
 // startWithDistributedClaiming starts the manager with distributed supplier claiming.
@@ -554,84 +507,6 @@ func (m *SupplierManager) addSupplierWithHandoff(ctx context.Context, supplier s
 type SupplierWarmupData struct {
 	OwnerAddress string
 	Services     []string
-}
-
-// warmupSuppliersParallel queries all supplier data from chain in parallel using a worker pool.
-// This avoids sequential startup delays when many suppliers are configured while respecting CPU limits.
-// Uses a subpool from the master worker pool to ensure we don't exceed system capacity.
-func (m *SupplierManager) warmupSuppliersParallel(ctx context.Context, supplierAddrs []string) map[string]*SupplierWarmupData {
-	if m.config.SupplierQueryClient == nil {
-		m.logger.Debug().Msg("no supplier query client configured, skipping warmup")
-		return nil
-	}
-
-	results := make(map[string]*SupplierWarmupData)
-	var mu sync.Mutex
-
-	m.logger.Debug().
-		Int("suppliers", len(supplierAddrs)).
-		Int("max_concurrent", 20).
-		Msg("starting parallel supplier warmup with bounded pond subpool")
-
-	// Use pond Group for coordinated task submission and waiting
-	// This allows us to wait for all warmup tasks to complete without blocking the persistent subpool
-	group := m.querySubpool.NewGroup()
-
-	// Submit all warmup tasks to the persistent querySubpool (20 workers max)
-	// This prevents unbounded goroutine spawning when warming up 100+ suppliers
-	for _, addr := range supplierAddrs {
-		operatorAddr := addr // capture for closure
-		group.Submit(func() {
-			// Create timeout context for this query
-			queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			defer cancel()
-
-			supplier, err := m.config.SupplierQueryClient.GetSupplier(queryCtx, operatorAddr)
-			if err != nil {
-				// Check if it's a NotFound error (supplier not staked)
-				if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
-					m.logger.Debug().
-						Str(logging.FieldSupplier, operatorAddr).
-						Msg("supplier not staked (pre-loaded key or unstaked)")
-				} else {
-					// Other errors (network, timeout, etc.)
-					m.logger.Warn().
-						Err(err).
-						Str(logging.FieldSupplier, operatorAddr).
-						Msg("failed to query supplier during warmup")
-				}
-				return
-			}
-
-			// Extract services from supplier
-			var services []string
-			for _, svc := range supplier.Services {
-				if svc != nil {
-					services = append(services, svc.ServiceId)
-				}
-			}
-
-			data := &SupplierWarmupData{
-				OwnerAddress: supplier.OwnerAddress,
-				Services:     services,
-			}
-
-			mu.Lock()
-			results[operatorAddr] = data
-			mu.Unlock()
-
-			m.logger.Debug().
-				Str(logging.FieldSupplier, operatorAddr).
-				Int("services", len(services)).
-				Msg("warmed supplier data")
-		})
-	}
-
-	// Wait for all warmup tasks to complete
-	if err := group.Wait(); err != nil {
-		m.logger.Warn().Err(err).Msg("some supplier warmup tasks failed")
-	}
-	return results
 }
 
 // onKeyChange handles key addition/removal notifications.

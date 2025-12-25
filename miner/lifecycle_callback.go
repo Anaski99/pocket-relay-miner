@@ -771,10 +771,34 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			Int("group_size", len(groupSnapshots)).
 			Msg("waiting for proof window to open")
 
-		proofWindowOpenBlock, blockErr := lc.waitForBlock(ctx, proofWindowOpenHeight)
+		// Wait for proof window to open (we'll use the seed block, not this one)
+		_, blockErr := lc.waitForBlock(ctx, proofWindowOpenHeight)
 		if blockErr != nil {
 			return fmt.Errorf("failed to wait for proof window open: %w", blockErr)
 		}
+
+		// Calculate proof requirement seed block height
+		// CRITICAL: This MUST match the validator's logic in x/proof/keeper/msg_server_submit_proof.go:328
+		// The validator uses BlockHash(earliestSupplierProofCommitHeight - 1) as the seed.
+		// Since earliestSupplierProofCommitHeight = proofWindowOpenHeight (distribution disabled in poktroll),
+		// the seed block height = proofWindowOpenHeight - 1
+		proofRequirementSeedHeight := proofWindowOpenHeight - 1
+
+		// Wait for the seed block to be available
+		proofRequirementSeedBlock, seedErr := lc.waitForBlock(ctx, proofRequirementSeedHeight)
+		if seedErr != nil {
+			logger.Warn().
+				Err(seedErr).
+				Int64("seed_height", proofRequirementSeedHeight).
+				Int64("proof_window_open_height", proofWindowOpenHeight).
+				Msg("failed to wait for proof requirement seed block")
+			return fmt.Errorf("failed to wait for proof requirement seed block: %w", seedErr)
+		}
+
+		logger.Debug().
+			Int64("proof_requirement_seed_height", proofRequirementSeedHeight).
+			Str("proof_requirement_seed_hash", fmt.Sprintf("%x", proofRequirementSeedBlock.Hash())).
+			Msg("obtained proof requirement seed block hash")
 
 		// Filter sessions based on proof requirement (probabilistic proof selection)
 		var sessionsNeedingProof []*SessionSnapshot
@@ -789,7 +813,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			}
 
 			if lc.proofChecker != nil {
-				required, checkErr := lc.proofChecker.IsProofRequired(ctx, snapshot, proofWindowOpenBlock.Hash())
+				required, checkErr := lc.proofChecker.IsProofRequired(ctx, snapshot, proofRequirementSeedBlock.Hash())
 				if checkErr != nil {
 					logger.Warn().
 						Err(checkErr).
@@ -837,17 +861,38 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			Int("proofs_to_submit", len(sessionsNeedingProof)).
 			Msg("waiting for assigned proof timing")
 
-		// Wait for the proof path seed block (one before earliest proof height)
+		// Calculate proof path seed block height (one before earliest proof height)
 		proofPathSeedBlockHeight := earliestProofHeight - 1
-		proofPathSeedBlock, seedErr := lc.waitForBlock(ctx, proofPathSeedBlockHeight)
-		if seedErr != nil {
-			return fmt.Errorf("failed to wait for proof path seed block: %w", seedErr)
-		}
 
-		logger.Debug().
-			Int64("proof_path_seed_block_height", proofPathSeedBlockHeight).
-			Str("proof_path_seed_block_hash", fmt.Sprintf("%x", proofPathSeedBlock.Hash())).
-			Msg("obtained proof path seed block hash")
+		// Optimization: Reuse the seed block we already fetched for proof requirement check
+		// if the heights match (they should, since distribution is disabled in poktroll)
+		var proofPathSeedBlock pocktclient.Block
+		if proofPathSeedBlockHeight == proofRequirementSeedHeight {
+			// Heights match - reuse the block we already fetched
+			proofPathSeedBlock = proofRequirementSeedBlock
+			logger.Debug().
+				Int64("proof_path_seed_block_height", proofPathSeedBlockHeight).
+				Str("proof_path_seed_block_hash", fmt.Sprintf("%x", proofPathSeedBlock.Hash())).
+				Msg("reusing proof requirement seed block for proof path (heights match)")
+		} else {
+			// Heights don't match - this shouldn't happen with current poktroll (distribution disabled),
+			// but if it ever gets re-enabled, we need to fetch the correct block
+			logger.Warn().
+				Int64("proof_path_seed_height", proofPathSeedBlockHeight).
+				Int64("proof_requirement_seed_height", proofRequirementSeedHeight).
+				Msg("seed block heights don't match - possible distribution enabled in future, re-fetching")
+
+			var seedErr error
+			proofPathSeedBlock, seedErr = lc.waitForBlock(ctx, proofPathSeedBlockHeight)
+			if seedErr != nil {
+				return fmt.Errorf("failed to wait for proof path seed block: %w", seedErr)
+			}
+
+			logger.Debug().
+				Int64("proof_path_seed_block_height", proofPathSeedBlockHeight).
+				Str("proof_path_seed_block_hash", fmt.Sprintf("%x", proofPathSeedBlock.Hash())).
+				Msg("obtained proof path seed block hash (re-fetched)")
+		}
 
 		// CRITICAL: Verify proof window is still open before proceeding
 		// This prevents wasting fees on proofs that will be rejected
