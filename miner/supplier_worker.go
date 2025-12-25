@@ -104,8 +104,10 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 	w.logger.Info().Msg("starting supplier worker")
 
 	// Create master worker pool
+	// AGGRESSIVE: 32x CPU for high parallelism (claim/proof building + blockchain queries)
+	// With 300 max_concurrent_transitions, we need enough workers in the master pool
 	numCPU := runtime.NumCPU()
-	masterPoolSize := numCPU * 8
+	masterPoolSize := numCPU * 32
 	w.masterPool = pond.NewPool(
 		masterPoolSize,
 		pond.WithQueueSize(pond.Unbounded),
@@ -114,7 +116,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 	w.logger.Info().
 		Int("max_workers", masterPoolSize).
 		Int("num_cpu", numCPU).
-		Msg("created master worker pool")
+		Msg("created master worker pool (AGGRESSIVE: 32x CPU for high supplier count)")
 
 	// Create query clients
 	var err error

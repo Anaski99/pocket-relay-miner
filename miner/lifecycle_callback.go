@@ -393,13 +393,13 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		}
 
 		// CRITICAL: Verify claim window is still open AND we have enough time to build+submit
-		// Building claims (SMST flush + headers) takes ~2 blocks, so we need buffer
+		// AGGRESSIVE MODE: Push claims until the very last block of the window
 		claimWindowClose := sharedtypes.GetClaimWindowCloseHeight(sharedParams, sessionEndHeight)
 		currentBlock := lc.blockClient.LastBlock(ctx)
 		blocksRemaining := claimWindowClose - currentBlock.Height()
 
-		// Require minimum 2 blocks buffer for building claims + TX propagation
-		const minBlocksRequired = 2
+		// AGGRESSIVE: No buffer - use every available block in the window
+		const minBlocksRequired = 0
 
 		if blocksRemaining < minBlocksRequired {
 			logger.Error().

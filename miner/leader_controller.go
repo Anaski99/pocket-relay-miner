@@ -105,8 +105,10 @@ func (c *LeaderController) Start(ctx context.Context) error {
 	c.logger.Info().Msg("starting leader controller - creating all resources")
 
 	// Create a master worker pool for controlled concurrency
+	// AGGRESSIVE: 32x CPU for high parallelism (claim/proof building + blockchain queries)
+	// With 300 max_concurrent_transitions, we need enough workers in the master pool
 	numCPU := runtime.NumCPU()
-	masterPoolSize := numCPU * 8
+	masterPoolSize := numCPU * 32
 	c.masterPool = pond.NewPool(
 		masterPoolSize,
 		pond.WithQueueSize(pond.Unbounded),
@@ -115,7 +117,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 	c.logger.Info().
 		Int("max_workers", masterPoolSize).
 		Int("num_cpu", numCPU).
-		Msg("created master worker pool (unbounded, non-blocking, 8x CPU)")
+		Msg("created master worker pool (AGGRESSIVE: unbounded, non-blocking, 32x CPU for high supplier count)")
 
 	// Create query clients
 	var err error
