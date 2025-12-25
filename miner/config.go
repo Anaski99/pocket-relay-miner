@@ -103,11 +103,6 @@ type SessionLifecycleConfigYAML struct {
 	// MaxConcurrentTransitions is the max number of sessions transitioning at once.
 	// Default: 10
 	MaxConcurrentTransitions int `yaml:"max_concurrent_transitions,omitempty"`
-
-	// StreamDiscoveryIntervalSeconds is how often to scan for new session streams (in seconds).
-	// This controls how quickly new session streams are discovered for consumption.
-	// Default: 10 seconds
-	StreamDiscoveryIntervalSeconds int64 `yaml:"stream_discovery_interval_seconds,omitempty"`
 }
 
 // LeaderElectionConfig contains configuration for distributed leader election.
@@ -401,14 +396,6 @@ func (c *Config) GetBlockHealthSlownessThreshold() float64 {
 		return c.BlockHealthMonitor.SlownessThreshold
 	}
 	return 1.5 // Default: 50% slower than expected
-}
-
-// GetStreamDiscoveryInterval returns the stream discovery interval as a duration.
-func (c *Config) GetStreamDiscoveryInterval() time.Duration {
-	if c.SessionLifecycle.StreamDiscoveryIntervalSeconds > 0 {
-		return time.Duration(c.SessionLifecycle.StreamDiscoveryIntervalSeconds) * time.Second
-	}
-	return 10 * time.Second // Default: 10 seconds
 }
 
 // GetCacheTTL returns the cache TTL for Redis cached data.

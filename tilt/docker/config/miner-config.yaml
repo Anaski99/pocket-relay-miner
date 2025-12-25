@@ -30,11 +30,7 @@ balance_monitor:
   stake_critical_proof_threshold: 3
 
 session_lifecycle:
-  window_start_buffer_blocks: 10
-  claim_submission_buffer: 2
-  proof_submission_buffer: 2
   max_concurrent_transitions: 10
-  stream_discovery_interval_seconds: 2
 
 leader_election:
   leader_ttl_seconds: 30

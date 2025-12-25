@@ -187,9 +187,6 @@ session_lifecycle:
   # Concurrent transitions (claim/proof building is parallelized for performance)
   max_concurrent_transitions: 10  # Limit parallel claim/proof submission batches
 
-  # Stream discovery
-  stream_discovery_interval_seconds: 10  # SCAN Redis for new session streams every 10s
-
 # ==============================================================================
 # Leader Election Configuration (HA Deployments)
 # ==============================================================================

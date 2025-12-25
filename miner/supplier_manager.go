@@ -90,8 +90,7 @@ type SupplierManagerConfig struct {
 
 	// Redis stream configuration
 	// Note: Stream consumption uses BLOCK 0 (TRUE PUSH) for live consumption - not configurable
-	ClaimIdleTimeout        time.Duration // How long a message can be pending before being claimed
-	StreamDiscoveryInterval time.Duration // How often to scan for new session streams (default: 10s)
+	ClaimIdleTimeout time.Duration // How long a message can be pending before being claimed
 
 	// SupplierCache for publishing supplier state to relayers
 	SupplierCache *cache.SupplierCache

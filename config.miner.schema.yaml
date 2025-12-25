@@ -296,29 +296,9 @@ properties:
     type: object
     description: Session lifecycle configuration (event-driven via block events)
     properties:
-      window_start_buffer_blocks:
-        type: integer
-        description: Delay submissions after window opens (spread submissions)
-        default: 10
-        minimum: 0
-      claim_submission_buffer:
-        type: integer
-        description: Blocks before claim window close to start claiming
-        default: 2
-        minimum: 0
-      proof_submission_buffer:
-        type: integer
-        description: Blocks before proof window close to start proving
-        default: 2
-        minimum: 0
       max_concurrent_transitions:
         type: integer
         description: Max number of sessions transitioning simultaneously
-        default: 10
-        minimum: 1
-      stream_discovery_interval_seconds:
-        type: integer
-        description: SCAN interval for discovering session streams (seconds)
         default: 10
         minimum: 1
 
