@@ -53,6 +53,7 @@ Examples:
 	cmd.AddCommand(redis.PubSubCmd())
 	cmd.AddCommand(redis.KeysCmd())
 	cmd.AddCommand(redis.FlushCmd())
+	cmd.AddCommand(redis.SubmissionsCmd())
 
 	return cmd
 }

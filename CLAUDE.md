@@ -224,8 +224,11 @@ Reference: See full mapping in `cmd/cmd_redis_debug.go` and subcommands
   - `ha:events:cache:{type}:invalidate` (Cache invalidation)
   - `ha:events:supplier_update` (Supplier registry updates)
   - `ha:meter:cleanup` (Meter cleanup signals)
+- **Submission Tracking** (7-day TTL for debugging):
+  - `ha:tx:track:{supplier}:{sessionEndHeight}:{sessionID}` (JSON with claim/proof submission details)
+  - Tracks: tx hashes, success/failure, error reasons, timing, relays, compute units
 
-**Debug any key pattern:** Use `pocket-relay-miner redis-debug keys --pattern "ha:*" --stats`
+**Debug any key pattern:** Use `pocket-relay-miner redis keys --pattern "ha:*" --stats`
 
 ### Performance Characteristics
 
@@ -421,9 +424,9 @@ go test -bench=. -benchmem ./miner/  # Benchmark SMST operations
 go test -bench=. -benchmem ./cache/  # Benchmark cache operations
 
 # Debugging (Production/Development)
-pocket-relay-miner redis-debug --help  # See all debug commands
-pocket-relay-miner redis-debug leader  # Check leader status
-pocket-relay-miner redis-debug keys --pattern "ha:*" --stats  # Inspect all HA keys
+pocket-relay-miner redis --help  # See all debug commands
+pocket-relay-miner redis leader  # Check leader status
+pocket-relay-miner redis keys --pattern "ha:*" --stats  # Inspect all HA keys
 ```
 
 ## Critical Files
@@ -473,44 +476,49 @@ pocket-relay-miner redis-debug keys --pattern "ha:*" --stats  # Inspect all HA k
 
 ### Debugging Redis Issues
 
-**Use the built-in redis-debug tool for all Redis debugging:**
+**Use the built-in redis command for all Redis debugging:**
 
 ```bash
 # Check leader election status
-pocket-relay-miner redis-debug leader
+pocket-relay-miner redis leader
 
 # Inspect session state
-pocket-relay-miner redis-debug sessions --supplier pokt1abc... --state active
+pocket-relay-miner redis sessions --supplier pokt1abc... --state active
 
 # View SMST tree for a session
-pocket-relay-miner redis-debug smst --session session_123
+pocket-relay-miner redis smst --session session_123
 
 # Monitor Redis Streams
-pocket-relay-miner redis-debug streams --supplier pokt1abc...
+pocket-relay-miner redis streams --supplier pokt1abc...
 
 # Inspect cache entries
-pocket-relay-miner redis-debug cache --type application --list
-pocket-relay-miner redis-debug cache --type application --key pokt1abc --invalidate
+pocket-relay-miner redis cache --type application --list
+pocket-relay-miner redis cache --type application --key pokt1abc --invalidate
 
 # List all keys by pattern
-pocket-relay-miner redis-debug keys --pattern "ha:smst:*" --stats
+pocket-relay-miner redis keys --pattern "ha:smst:*" --stats
 
 # Monitor pub/sub events in real-time
-pocket-relay-miner redis-debug pubsub --channel "ha:events:cache:application:invalidate"
+pocket-relay-miner redis pubsub --channel "ha:events:cache:application:invalidate"
 
 # Check deduplication sets
-pocket-relay-miner redis-debug dedup --session session_123
+pocket-relay-miner redis dedup --session session_123
 
 # View supplier registry
-pocket-relay-miner redis-debug supplier --list
+pocket-relay-miner redis supplier --list
 
 # Inspect metering data
-pocket-relay-miner redis-debug meter --session session_123
-pocket-relay-miner redis-debug meter --app pokt1abc
-pocket-relay-miner redis-debug meter --all
+pocket-relay-miner redis meter --session session_123
+pocket-relay-miner redis meter --app pokt1abc
+pocket-relay-miner redis meter --all
+
+# Debug claim/proof submission tracking (7-day history)
+pocket-relay-miner redis submissions --supplier pokt1abc...
+pocket-relay-miner redis submissions --supplier pokt1abc... --failed-only
+pocket-relay-miner redis submissions --supplier pokt1abc... --session <session_id> --session-end <height>
 
 # Flush old/test data (DANGEROUS - requires confirmation)
-pocket-relay-miner redis-debug flush --pattern "ha:test:*"
+pocket-relay-miner redis flush --pattern "ha:test:*"
 ```
 
 **Available debug commands:**
@@ -524,9 +532,10 @@ pocket-relay-miner redis-debug flush --pattern "ha:test:*"
 - `meter`: Inspect relay metering and parameter data
 - `pubsub`: Monitor pub/sub channels in real-time
 - `keys`: List keys by pattern with type/TTL stats
+- `submissions`: Debug claim/proof submission tracking (tx hashes, success/failure, errors, timing)
 - `flush`: Delete keys with safety confirmations
 
-**Low-level redis-cli fallback (only if redis-debug insufficient):**
+**Low-level redis-cli fallback (only if redis command insufficient):**
 
 ```bash
 # Check Redis memory
@@ -535,7 +544,7 @@ redis-cli INFO memory
 # Monitor commands (very verbose)
 redis-cli MONITOR
 
-# Direct key inspection (prefer redis-debug tools)
+# Direct key inspection (prefer redis command tools)
 redis-cli KEYS "ha:smst:*" | head -10
 redis-cli HGETALL "ha:smst:session123:nodes"
 ```

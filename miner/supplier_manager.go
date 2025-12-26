@@ -689,6 +689,11 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		// This stops the consumer from reading stale messages and frees Redis memory
 		lifecycleCallback.SetStreamDeleter(consumer)
 
+		// Wire submission tracker for debugging claim/proof submissions
+		// Tracks tx hashes, success/failure, errors, and timing for post-mortem analysis
+		submissionTracker := NewSubmissionTracker(m.logger, m.config.RedisClient)
+		lifecycleCallback.SetSubmissionTracker(submissionTracker)
+
 		// Create lifecycle manager for monitoring sessions and triggering claim/proof
 		lifecycleConfig := m.config.SessionLifecycleConfig
 		lifecycleConfig.SupplierAddress = operatorAddr // Override for this supplier

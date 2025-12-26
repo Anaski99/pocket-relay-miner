@@ -2,6 +2,7 @@ package miner
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
@@ -116,6 +117,10 @@ type LifecycleCallback struct {
 	// If nil, streams are not deleted (will rely on TTL expiration).
 	streamDeleter StreamDeleter
 
+	// submissionTracker tracks claim/proof submissions to Redis for debugging.
+	// If nil, submissions are not tracked.
+	submissionTracker *SubmissionTracker
+
 	// Per-session locks to prevent concurrent claim/proof operations
 	sessionLocks   map[string]*sync.Mutex
 	sessionLocksMu sync.Mutex
@@ -177,6 +182,12 @@ func (lc *LifecycleCallback) SetAppClient(client ApplicationQueryClient) {
 // This is optional - if not set, streams rely on TTL expiration.
 func (lc *LifecycleCallback) SetStreamDeleter(deleter StreamDeleter) {
 	lc.streamDeleter = deleter
+}
+
+// SetSubmissionTracker sets the submission tracker for debugging claim/proof submissions.
+// This is optional - if not set, submissions are not tracked.
+func (lc *LifecycleCallback) SetSubmissionTracker(tracker *SubmissionTracker) {
+	lc.submissionTracker = tracker
 }
 
 // removeSessionLock removes a per-session lock.
@@ -711,6 +722,37 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					sessionIndex++
 				}
 
+				// Track claim submissions to Redis for debugging
+				if lc.submissionTracker != nil {
+					for i, snapshot := range validSnapshots {
+						claimHash := hex.EncodeToString(groupRootHashes[i])
+						if trackErr := lc.submissionTracker.TrackClaimSubmission(
+							ctx,
+							snapshot.SupplierOperatorAddress,
+							snapshot.ServiceID,
+							snapshot.ApplicationAddress,
+							snapshot.SessionID,
+							snapshot.SessionStartHeight,
+							snapshot.SessionEndHeight,
+							claimHash,
+							claimTxHash,
+							true, // success
+							"",   // no error
+							earliestClaimHeight,
+							currentBlock.Height(),
+							snapshot.RelayCount,
+							int64(snapshot.TotalComputeUnits),
+							false, // proof_required unknown at claim time
+							"",    // proof_requirement_seed unknown at claim time
+						); trackErr != nil {
+							logger.Warn().
+								Err(trackErr).
+								Str("session_id", snapshot.SessionID).
+								Msg("failed to track claim submission")
+						}
+					}
+				}
+
 				logger.Info().
 					Int("batch_size", len(claimMsgs)).
 					Str("claim_tx_hash", claimTxHash).
@@ -726,6 +768,38 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				RecordClaimError(snapshot.SupplierOperatorAddress, "exhausted_retries")
 				RecordRevenueLost(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "claim_exhausted_retries", snapshot.TotalComputeUnits, snapshot.RelayCount)
 			}
+
+			// Track failed claim submissions to Redis for debugging
+			if lc.submissionTracker != nil {
+				for i, snapshot := range validSnapshots {
+					claimHash := hex.EncodeToString(groupRootHashes[i])
+					if trackErr := lc.submissionTracker.TrackClaimSubmission(
+						ctx,
+						snapshot.SupplierOperatorAddress,
+						snapshot.ServiceID,
+						snapshot.ApplicationAddress,
+						snapshot.SessionID,
+						snapshot.SessionStartHeight,
+						snapshot.SessionEndHeight,
+						claimHash,
+						"",    // no TX hash on failure
+						false, // failed
+						lastErr.Error(),
+						earliestClaimHeight,
+						lc.blockClient.LastBlock(ctx).Height(),
+						snapshot.RelayCount,
+						int64(snapshot.TotalComputeUnits),
+						false, // proof_required unknown at claim time
+						"",    // proof_requirement_seed unknown at claim time
+					); trackErr != nil {
+						logger.Warn().
+							Err(trackErr).
+							Str("session_id", snapshot.SessionID).
+							Msg("failed to track failed claim submission")
+					}
+				}
+			}
+
 			return nil, fmt.Errorf("batched claim submission failed after %d attempts: %w", lc.config.ClaimRetryAttempts, lastErr)
 		}
 	}
@@ -1185,6 +1259,35 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					RecordRevenueProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
 				}
 
+				// Track proof submissions to Redis for debugging
+				if lc.submissionTracker != nil {
+					proofRequirementSeed := hex.EncodeToString(proofRequirementSeedBlock.Hash())
+					for i, snapshot := range sessionsNeedingProof {
+						// Get proof hash from proof message
+						proofHash := hex.EncodeToString(proofMsgs[i].Proof)
+
+						if trackErr := lc.submissionTracker.TrackProofSubmission(
+							ctx,
+							snapshot.SupplierOperatorAddress,
+							snapshot.SessionEndHeight,
+							snapshot.SessionID,
+							proofHash,
+							proofTxHash,
+							true, // success
+							"",   // no error
+							earliestProofHeight,
+							currentBlock.Height(),
+							true,                 // proof was required
+							proofRequirementSeed, // seed used for proof requirement check
+						); trackErr != nil {
+							logger.Warn().
+								Err(trackErr).
+								Str("session_id", snapshot.SessionID).
+								Msg("failed to track proof submission")
+						}
+					}
+				}
+
 				logger.Info().
 					Int("batch_size", len(proofMsgs)).
 					Str("proof_tx_hash", proofTxHash).
@@ -1200,6 +1303,36 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				RecordProofError(snapshot.SupplierOperatorAddress, "exhausted_retries")
 				RecordRevenueLost(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "proof_exhausted_retries", snapshot.TotalComputeUnits, snapshot.RelayCount)
 			}
+
+			// Track failed proof submissions to Redis for debugging
+			if lc.submissionTracker != nil {
+				proofRequirementSeed := hex.EncodeToString(proofRequirementSeedBlock.Hash())
+				for i, snapshot := range sessionsNeedingProof {
+					// Get proof hash from proof message (proof was built, but submission failed)
+					proofHash := hex.EncodeToString(proofMsgs[i].Proof)
+
+					if trackErr := lc.submissionTracker.TrackProofSubmission(
+						ctx,
+						snapshot.SupplierOperatorAddress,
+						snapshot.SessionEndHeight,
+						snapshot.SessionID,
+						proofHash,
+						"",    // no TX hash on failure
+						false, // failed
+						lastErr.Error(),
+						earliestProofHeight,
+						lc.blockClient.LastBlock(ctx).Height(),
+						true,                 // proof was required (we attempted submission)
+						proofRequirementSeed, // seed used for proof requirement check
+					); trackErr != nil {
+						logger.Warn().
+							Err(trackErr).
+							Str("session_id", snapshot.SessionID).
+							Msg("failed to track failed proof submission")
+					}
+				}
+			}
+
 			return fmt.Errorf("batched proof submission failed after %d attempts: %w", lc.config.ProofRetryAttempts, lastErr)
 		}
 	}
