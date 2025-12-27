@@ -192,6 +192,21 @@ type TransactionConfig struct {
 	// Example: 1.7 means add 70% safety margin above simulated gas.
 	// Default: 1.7
 	GasAdjustment float64 `yaml:"gas_adjustment,omitempty"`
+
+	// DisableClaimBatching disables batching of claim submissions.
+	// When true, each session's claim is submitted in a separate transaction.
+	// When false (default), claims with the same session end height are batched.
+	// WORKAROUND: Set to true if experiencing claim failures due to one invalid claim in a batch.
+	// Default: false (batching enabled for gas efficiency)
+	DisableClaimBatching bool `yaml:"disable_claim_batching,omitempty"`
+
+	// DisableProofBatching disables batching of proof submissions.
+	// When true, each session's proof is submitted in a separate transaction.
+	// When false (default), proofs with the same session end height are batched.
+	// WORKAROUND: Set to true if experiencing proof failures due to difficulty validation
+	// or other issues where one invalid proof causes the entire batch to fail.
+	// Default: false (batching enabled for gas efficiency)
+	DisableProofBatching bool `yaml:"disable_proof_batching,omitempty"`
 }
 
 type SupplierConfig struct {
@@ -470,9 +485,11 @@ func DefaultConfig() *Config {
 			AsyncBufferSize: 100000,
 		},
 		Transaction: TransactionConfig{
-			GasLimit:      0,               // 0 = automatic gas estimation via simulation
-			GasPrice:      "0.000001upokt", // Default gas price
-			GasAdjustment: 1.7,             // Default 70% safety margin
+			GasLimit:             0,               // 0 = automatic gas estimation via simulation
+			GasPrice:             "0.000001upokt", // Default gas price
+			GasAdjustment:        1.7,             // Default 70% safety margin
+			DisableClaimBatching: true,            // Default: true (WORKAROUND for difficulty validation failures)
+			DisableProofBatching: true,            // Default: true (WORKAROUND for difficulty validation failures)
 		},
 		DeduplicationTTLBlocks: 10,
 		BatchSize:              1000, // Increased from 100 for better throughput (10x more efficient)

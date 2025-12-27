@@ -34,6 +34,14 @@ type LifecycleCallbackConfig struct {
 
 	// ProofRetryDelay is the delay between retry attempts.
 	ProofRetryDelay time.Duration
+
+	// DisableClaimBatching disables batching of claim submissions.
+	// When true, each session's claim is submitted in a separate transaction.
+	DisableClaimBatching bool
+
+	// DisableProofBatching disables batching of proof submissions.
+	// When true, each session's proof is submitted in a separate transaction.
+	DisableProofBatching bool
 }
 
 // DefaultLifecycleCallbackConfig returns sensible defaults.
@@ -360,16 +368,45 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 	}
 
 	// Group sessions by session end height (they might have different claim windows)
+	// WORKAROUND: If batching is disabled, create one group per session to avoid
+	// cross-contamination where one invalid claim causes the entire batch to fail.
 	sessionsByEndHeight := make(map[int64][]*SessionSnapshot)
-	for _, snapshot := range snapshots {
-		sessionsByEndHeight[snapshot.SessionEndHeight] = append(sessionsByEndHeight[snapshot.SessionEndHeight], snapshot)
+	if lc.config.DisableClaimBatching {
+		// No batching - each session in its own "group" using unique key
+		logger.Info().
+			Int("total_sessions", len(snapshots)).
+			Bool("batching_disabled", true).
+			Msg("CLAIM_BATCHING_DISABLED: submitting each session in separate transaction (workaround for difficulty validation)")
+		for i, snapshot := range snapshots {
+			// Use negative index as key to avoid conflicts with real end heights
+			sessionsByEndHeight[int64(-i-1)] = []*SessionSnapshot{snapshot}
+		}
+	} else {
+		// Normal batching - group by session end height
+		logger.Info().
+			Int("total_sessions", len(snapshots)).
+			Bool("batching_enabled", true).
+			Msg("claim batching enabled - grouping sessions by end height")
+		for _, snapshot := range snapshots {
+			sessionsByEndHeight[snapshot.SessionEndHeight] = append(sessionsByEndHeight[snapshot.SessionEndHeight], snapshot)
+		}
 	}
+
+	logger.Info().
+		Int("total_sessions", len(snapshots)).
+		Int("num_batches", len(sessionsByEndHeight)).
+		Bool("batching_disabled", lc.config.DisableClaimBatching).
+		Msg("claim batching strategy applied")
 
 	// Process each group (same claim window) separately
 	allRootHashes := make([][]byte, len(snapshots))
 	sessionIndex := 0
 
-	for sessionEndHeight, groupSnapshots := range sessionsByEndHeight {
+	for _, groupSnapshots := range sessionsByEndHeight {
+		// Get the actual session end height from the first snapshot in the group
+		// (all snapshots in a group have the same end height)
+		sessionEndHeight := groupSnapshots[0].SessionEndHeight
+
 		// Wait for claim window to open and get the block hash for timing spread
 		claimWindowOpenHeight := sharedtypes.GetClaimWindowOpenHeight(sharedParams, sessionEndHeight)
 		logger.Debug().
@@ -830,13 +867,43 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 	}
 
 	// Group sessions by session end height (they might have different proof windows)
+	// WORKAROUND: If batching is disabled, create one group per session to avoid
+	// cross-contamination where one invalid proof (e.g., difficulty validation failure)
+	// causes the entire batch to fail.
 	sessionsByEndHeight := make(map[int64][]*SessionSnapshot)
-	for _, snapshot := range snapshots {
-		sessionsByEndHeight[snapshot.SessionEndHeight] = append(sessionsByEndHeight[snapshot.SessionEndHeight], snapshot)
+	if lc.config.DisableProofBatching {
+		// No batching - each session in its own "group" using unique key
+		logger.Info().
+			Int("total_sessions", len(snapshots)).
+			Bool("batching_disabled", true).
+			Msg("PROOF_BATCHING_DISABLED: submitting each session in separate transaction (workaround for difficulty validation)")
+		for i, snapshot := range snapshots {
+			// Use negative index as key to avoid conflicts with real end heights
+			sessionsByEndHeight[int64(-i-1)] = []*SessionSnapshot{snapshot}
+		}
+	} else {
+		// Normal batching - group by session end height
+		logger.Info().
+			Int("total_sessions", len(snapshots)).
+			Bool("batching_enabled", true).
+			Msg("proof batching enabled - grouping sessions by end height")
+		for _, snapshot := range snapshots {
+			sessionsByEndHeight[snapshot.SessionEndHeight] = append(sessionsByEndHeight[snapshot.SessionEndHeight], snapshot)
+		}
 	}
 
+	logger.Info().
+		Int("total_sessions", len(snapshots)).
+		Int("num_batches", len(sessionsByEndHeight)).
+		Bool("batching_disabled", lc.config.DisableProofBatching).
+		Msg("proof batching strategy applied")
+
 	// Process each group (same proof window) separately
-	for sessionEndHeight, groupSnapshots := range sessionsByEndHeight {
+	for _, groupSnapshots := range sessionsByEndHeight {
+		// Get the actual session end height from the first snapshot in the group
+		// (all snapshots in a group have the same end height)
+		sessionEndHeight := groupSnapshots[0].SessionEndHeight
+
 		// Wait for proof window to open
 		proofWindowOpenHeight := sharedtypes.GetProofWindowOpenHeight(sharedParams, sessionEndHeight)
 		logger.Debug().

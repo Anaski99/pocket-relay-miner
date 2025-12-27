@@ -138,6 +138,16 @@ type SupplierManagerConfig struct {
 	// ClaimerConfig contains configuration for the SupplierClaimer.
 	// Used for distributed supplier claiming across multiple miners via Redis leases.
 	ClaimerConfig SupplierClaimerConfig
+
+	// DisableClaimBatching disables batching of claim submissions.
+	// WORKAROUND: Set to true to avoid cross-contamination where one invalid claim
+	// causes the entire batch to fail.
+	DisableClaimBatching bool
+
+	// DisableProofBatching disables batching of proof submissions.
+	// WORKAROUND: Set to true to avoid cross-contamination where one invalid proof
+	// (e.g., difficulty validation failure) causes the entire batch to fail.
+	DisableProofBatching bool
 }
 
 // SupplierManager manages multiple suppliers in the HA Miner.
@@ -665,6 +675,8 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		// Create lifecycle callback for claim/proof submission
 		lifecycleCallbackConfig := DefaultLifecycleCallbackConfig()
 		lifecycleCallbackConfig.SupplierAddress = operatorAddr
+		lifecycleCallbackConfig.DisableClaimBatching = m.config.DisableClaimBatching
+		lifecycleCallbackConfig.DisableProofBatching = m.config.DisableProofBatching
 		lifecycleCallback = NewLifecycleCallback(
 			m.logger,
 			supplierClient,
