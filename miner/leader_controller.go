@@ -410,6 +410,8 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		c.blockSubscriber,
 		c.blockSubscriber.GetRPCClient(),
 		supplierAddresses,
+		c.masterPool,
+		nil, // SessionStore not available in LeaderController (settlement metadata won't be updated)
 	)
 	if err := c.settlementMonitor.Start(ctx); err != nil {
 		c.cleanup()

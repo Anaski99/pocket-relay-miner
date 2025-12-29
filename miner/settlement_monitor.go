@@ -3,12 +3,14 @@ package miner
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"sync"
+	"time"
 
+	pond "github.com/alitto/pond/v2"
 	abcitypes "github.com/cometbft/cometbft/abci/types"
 	"github.com/cometbft/cometbft/rpc/client/http"
-	"github.com/sourcegraph/conc/pool"
 
 	haclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -26,19 +28,23 @@ type SettlementMonitor struct {
 	blockSubscriber *haclient.BlockSubscriber
 	rpcClient       *http.HTTP
 	suppliers       map[string]bool // Set of supplier addresses to monitor
+	sessionStore    SessionStore    // For updating settlement metadata (optional)
 	mu              sync.RWMutex
-	workerPool      *pool.Pool // Worker pool for processing block_results (1GB+ in mainnet)
+	workerPool      pond.Pool // Subpool for processing block_results (1GB+ in mainnet)
 	ctx             context.Context
 	cancel          context.CancelFunc
-	wg              sync.WaitGroup
 }
 
 // NewSettlementMonitor creates a new settlement monitor.
+// The masterPool parameter is required for creating settlement processing subpool.
+// The sessionStore parameter is optional - if nil, settlement metadata won't be updated.
 func NewSettlementMonitor(
 	logger logging.Logger,
 	blockSubscriber *haclient.BlockSubscriber,
 	rpcClient *http.HTTP,
 	suppliers []string,
+	masterPool pond.Pool,
+	sessionStore SessionStore,
 ) *SettlementMonitor {
 	// Build supplier set for fast lookup
 	supplierSet := make(map[string]bool, len(suppliers))
@@ -46,16 +52,18 @@ func NewSettlementMonitor(
 		supplierSet[supplier] = true
 	}
 
-	// Create worker pool for processing block_results asynchronously
-	// Pool size: 2 workers (settlement events are rare, 1 per session)
-	workerPool := pool.New().WithMaxGoroutines(2)
+	// Create settlement processing subpool from master pool
+	// Subpool size: 2 workers (settlement events are rare, 1 per session)
+	// Using a subpool ensures settlement processing doesn't lock claim/proof submission
+	settlementSubpool := masterPool.NewSubpool(2)
 
 	return &SettlementMonitor{
 		logger:          logging.ForComponent(logger, "settlement_monitor"),
 		blockSubscriber: blockSubscriber,
 		rpcClient:       rpcClient,
 		suppliers:       supplierSet,
-		workerPool:      workerPool,
+		sessionStore:    sessionStore,
+		workerPool:      settlementSubpool,
 	}
 }
 
@@ -66,10 +74,8 @@ func (sm *SettlementMonitor) Start(ctx context.Context) error {
 	// Subscribe to block events
 	blockEvents := sm.blockSubscriber.Subscribe(sm.ctx, 100)
 
-	sm.wg.Add(1)
-	go func() {
-		defer sm.wg.Done()
-
+	// Submit main event loop to pond worker subpool (no uncontrolled goroutines)
+	sm.workerPool.Submit(func() {
 		sm.logger.Info().Msg("settlement monitor started")
 
 		for {
@@ -84,14 +90,20 @@ func (sm *SettlementMonitor) Start(ctx context.Context) error {
 					return
 				}
 
-				// Submit to worker pool to avoid blocking on large block_results (1GB+ in mainnet)
+				// Submit block processing to worker subpool to avoid blocking on large block_results (1GB+ in mainnet)
 				blockHeight := block.Height()
-				sm.workerPool.Go(func() {
-					sm.processBlock(blockHeight)
+				sm.workerPool.Submit(func() {
+					// Query height-1 to avoid race condition with ABCI indexing
+					// Block events from WebSocket arrive real-time, but block_results
+					// are indexed asynchronously by the ABCI module.
+					// Querying the previous block ensures data is indexed.
+					if blockHeight > 1 {
+						sm.processBlock(blockHeight - 1)
+					}
 				})
 			}
 		}
-	}()
+	})
 
 	return nil
 }
@@ -101,10 +113,11 @@ func (sm *SettlementMonitor) Close() {
 	if sm.cancel != nil {
 		sm.cancel()
 	}
-	sm.wg.Wait()
 
-	// Wait for all pending block_results queries to complete
-	sm.workerPool.Wait()
+	// Stop settlement subpool gracefully (drains queued tasks including event loop and block_results queries)
+	if sm.workerPool != nil {
+		sm.workerPool.StopAndWait()
+	}
 
 	sm.logger.Info().Msg("settlement monitor closed")
 }
@@ -123,23 +136,84 @@ func (sm *SettlementMonitor) RemoveSupplier(supplier string) {
 	delete(sm.suppliers, supplier)
 }
 
-// processBlock queries block_results for the given height and processes any EventClaimSettled events.
+// processBlock queries block_results for the given height and processes settlement events.
+// This function implements infinite retry with exponential backoff to ensure settlement
+// data is never lost. Only stops on context cancellation (shutdown).
 func (sm *SettlementMonitor) processBlock(height int64) {
-	// Query block_results for this height
-	result, err := sm.rpcClient.BlockResults(sm.ctx, &height)
-	if err != nil {
-		sm.logger.Warn().
-			Err(err).
-			Int64("height", height).
-			Msg("failed to query block results")
-		return
-	}
+	const (
+		initialRetryDelay = 2 * time.Second
+		maxRetryDelay     = 30 * time.Second
+		backoffMultiplier = 1.5
+	)
 
-	// Process all events in this block
-	for _, event := range result.FinalizeBlockEvents {
-		if event.Type == "pocket.tokenomics.EventClaimSettled" {
-			sm.handleClaimSettled(event.Attributes, height)
+	retryDelay := initialRetryDelay
+	attempt := 0
+
+	for {
+		// Check for shutdown
+		select {
+		case <-sm.ctx.Done():
+			sm.logger.Warn().
+				Int64("height", height).
+				Int("attempt", attempt).
+				Msg("shutting down, abandoning block_results query")
+			return
+		default:
 		}
+
+		attempt++
+
+		// Query block_results for this height
+		result, err := sm.rpcClient.BlockResults(sm.ctx, &height)
+		if err != nil {
+			sm.logger.Warn().
+				Err(err).
+				Int64("height", height).
+				Int("attempt", attempt).
+				Dur("retry_in", retryDelay).
+				Msg("failed to query block_results, will retry")
+
+			// Record metric for retry
+			RecordBlockResultsRetry(height, attempt)
+
+			// Wait before retry with exponential backoff
+			select {
+			case <-sm.ctx.Done():
+				sm.logger.Warn().
+					Int64("height", height).
+					Msg("shutting down during retry backoff")
+				return
+			case <-time.After(retryDelay):
+				// Increase retry delay with exponential backoff
+				retryDelay = time.Duration(float64(retryDelay) * backoffMultiplier)
+				if retryDelay > maxRetryDelay {
+					retryDelay = maxRetryDelay
+				}
+				continue
+			}
+		}
+
+		// Success! Process all settlement events in this block
+		sm.logger.Debug().
+			Int64("height", height).
+			Int("attempt", attempt).
+			Int("events", len(result.FinalizeBlockEvents)).
+			Msg("successfully queried block_results")
+
+		for _, event := range result.FinalizeBlockEvents {
+			switch event.Type {
+			case "pocket.tokenomics.EventClaimSettled":
+				sm.handleClaimSettled(event.Attributes, height)
+			case "pocket.tokenomics.EventClaimExpired":
+				sm.handleClaimExpired(event.Attributes, height)
+			case "pocket.tokenomics.EventSupplierSlashed":
+				sm.handleSupplierSlashed(event.Attributes, height)
+			case "pocket.tokenomics.EventClaimDiscarded":
+				sm.handleClaimDiscarded(event.Attributes, height)
+			}
+		}
+
+		return
 	}
 }
 
@@ -204,6 +278,22 @@ func (sm *SettlementMonitor) handleClaimSettled(attributes []abcitypes.EventAttr
 
 	// Record metrics
 	RecordClaimSettled(supplier, serviceID, status, numRelays, computeUnits, upoktEarned, sessionEndHeight, settlementHeight)
+
+	// OPTIONAL: Update settlement metadata in session snapshot (if session still exists in Redis)
+	if sm.sessionStore != nil {
+		// Try to extract session_id from attributes (may not be present)
+		sessionID := extractStringValue(attrs["session_id"])
+		if sessionID != "" {
+			outcome := fmt.Sprintf("settled_%s", status) // "settled_proven", "settled_invalid", "settled_expired"
+			if err := sm.sessionStore.UpdateSettlementMetadata(sm.ctx, sessionID, outcome, settlementHeight); err != nil {
+				// Non-critical: session may already be cleaned up (expected for old sessions)
+				sm.logger.Debug().
+					Err(err).
+					Str("session_id", sessionID).
+					Msg("failed to update settlement metadata (session may be cleaned up)")
+			}
+		}
+	}
 }
 
 // extractSupplierReward parses the reward_distribution JSON and extracts the supplier's reward amount.
@@ -266,4 +356,136 @@ func parseUpoktAmount(amount string) int64 {
 		return 0
 	}
 	return val
+}
+
+// handleClaimExpired processes a single EventClaimExpired event.
+// Emitted when a claim expires without a proof (PROOF_MISSING or PROOF_INVALID).
+func (sm *SettlementMonitor) handleClaimExpired(attributes []abcitypes.EventAttribute, settlementHeight int64) {
+	// Extract attributes
+	attrs := make(map[string]string)
+	for _, attr := range attributes {
+		attrs[attr.Key] = attr.Value
+	}
+
+	// Extract supplier address
+	supplier := extractStringValue(attrs["supplier_operator_address"])
+
+	// Check if this is one of our suppliers
+	sm.mu.RLock()
+	isOurs := sm.suppliers[supplier]
+	sm.mu.RUnlock()
+
+	if !isOurs {
+		return // Not one of our suppliers, skip
+	}
+
+	// Extract other attributes
+	serviceID := extractStringValue(attrs["service_id"])
+	expirationReasonRaw := extractStringValue(attrs["expiration_reason"])
+	numRelays := extractIntValue(attrs["num_relays"])
+	computeUnits := extractIntValue(attrs["num_claimed_compute_units"])
+	sessionEndHeight := extractIntValue(attrs["session_end_block_height"])
+	claimedUpokt := extractStringValue(attrs["claimed_upokt"])
+
+	// Map expiration reason string from blockchain to lowercase metric label
+	// Blockchain sends: "PROOF_MISSING", "PROOF_INVALID", etc.
+	var reason string
+	switch expirationReasonRaw {
+	case "PROOF_MISSING":
+		reason = "proof_missing"
+	case "PROOF_INVALID":
+		reason = "proof_invalid"
+	default:
+		reason = "unspecified"
+	}
+
+	sm.logger.Warn().
+		Str("supplier", supplier).
+		Str("service_id", serviceID).
+		Str("expiration_reason", reason).
+		Int64("num_relays", numRelays).
+		Int64("compute_units", computeUnits).
+		Str("claimed_upokt", claimedUpokt).
+		Int64("session_end_height", sessionEndHeight).
+		Int64("settlement_height", settlementHeight).
+		Msg("claim expired on-chain")
+
+	// Record metrics
+	RecordClaimExpired(supplier, serviceID, reason, numRelays, computeUnits, sessionEndHeight, settlementHeight)
+}
+
+// handleSupplierSlashed processes a single EventSupplierSlashed event.
+// Emitted when a supplier is slashed for missing proof submission.
+func (sm *SettlementMonitor) handleSupplierSlashed(attributes []abcitypes.EventAttribute, settlementHeight int64) {
+	// Extract attributes
+	attrs := make(map[string]string)
+	for _, attr := range attributes {
+		attrs[attr.Key] = attr.Value
+	}
+
+	// Extract supplier address
+	supplier := extractStringValue(attrs["supplier_operator_address"])
+
+	// Check if this is one of our suppliers
+	sm.mu.RLock()
+	isOurs := sm.suppliers[supplier]
+	sm.mu.RUnlock()
+
+	if !isOurs {
+		return // Not one of our suppliers, skip
+	}
+
+	// Extract other attributes
+	serviceID := extractStringValue(attrs["service_id"])
+	penalty := extractStringValue(attrs["proof_missing_penalty"])
+	sessionEndHeight := extractIntValue(attrs["session_end_block_height"])
+
+	sm.logger.Error().
+		Str("supplier", supplier).
+		Str("service_id", serviceID).
+		Str("penalty", penalty).
+		Int64("session_end_height", sessionEndHeight).
+		Int64("settlement_height", settlementHeight).
+		Msg("supplier slashed on-chain")
+
+	// Record metrics
+	RecordSupplierSlashed(supplier, serviceID, penalty, sessionEndHeight, settlementHeight)
+}
+
+// handleClaimDiscarded processes a single EventClaimDiscarded event.
+// Emitted when a claim is discarded due to unexpected errors to prevent chain halts.
+func (sm *SettlementMonitor) handleClaimDiscarded(attributes []abcitypes.EventAttribute, settlementHeight int64) {
+	// Extract attributes
+	attrs := make(map[string]string)
+	for _, attr := range attributes {
+		attrs[attr.Key] = attr.Value
+	}
+
+	// Extract supplier address
+	supplier := extractStringValue(attrs["supplier_operator_address"])
+
+	// Check if this is one of our suppliers
+	sm.mu.RLock()
+	isOurs := sm.suppliers[supplier]
+	sm.mu.RUnlock()
+
+	if !isOurs {
+		return // Not one of our suppliers, skip
+	}
+
+	// Extract other attributes
+	serviceID := extractStringValue(attrs["service_id"])
+	errorMsg := extractStringValue(attrs["error"])
+	sessionEndHeight := extractIntValue(attrs["session_end_block_height"])
+
+	sm.logger.Error().
+		Str("supplier", supplier).
+		Str("service_id", serviceID).
+		Str("error", errorMsg).
+		Int64("session_end_height", sessionEndHeight).
+		Int64("settlement_height", settlementHeight).
+		Msg("claim discarded on-chain")
+
+	// Record metrics
+	RecordClaimDiscarded(supplier, serviceID, errorMsg, sessionEndHeight, settlementHeight)
 }

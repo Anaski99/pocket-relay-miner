@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,30 @@ import (
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 )
+
+// TestConfig holds test mode flags read once at initialization.
+// These environment variables are only for testing and should not be set in production.
+type TestConfig struct {
+	// ForceClaimTxError forces claim transaction submission to fail (for testing claim error path)
+	ForceClaimTxError bool
+
+	// ForceProofTxError forces proof transaction submission to fail (for testing proof error path)
+	ForceProofTxError bool
+}
+
+var (
+	testConfig     TestConfig
+	testConfigOnce sync.Once
+)
+
+// getTestConfig returns the test configuration, reading environment variables once.
+func getTestConfig() TestConfig {
+	testConfigOnce.Do(func() {
+		testConfig.ForceClaimTxError = os.Getenv("TEST_FORCE_CLAIM_TX_ERROR") == "true"
+		testConfig.ForceProofTxError = os.Getenv("TEST_FORCE_PROOF_TX_ERROR") == "true"
+	})
+	return testConfig
+}
 
 const (
 	// DefaultGasPrice is the default gas price in upokt.
@@ -745,10 +770,21 @@ func NewHASupplierClient(
 	operatorAddr string,
 	logger logging.Logger,
 ) *HASupplierClient {
+	supplierLogger := logger.With().Str("supplier", operatorAddr).Logger()
+
+	// DEBUG/TEST: Log test mode environment variables at startup
+	testCfg := getTestConfig()
+	if testCfg.ForceClaimTxError {
+		supplierLogger.Warn().Msg("TEST MODE: TEST_FORCE_CLAIM_TX_ERROR detected - will force claim TX errors")
+	}
+	if testCfg.ForceProofTxError {
+		supplierLogger.Warn().Msg("TEST MODE: TEST_FORCE_PROOF_TX_ERROR detected - will force proof TX errors")
+	}
+
 	return &HASupplierClient{
 		txClient:     txClient,
 		operatorAddr: operatorAddr,
-		logger:       logger.With().Str("supplier", operatorAddr).Logger(),
+		logger:       supplierLogger,
 	}
 }
 
@@ -771,6 +807,14 @@ func (c *HASupplierClient) CreateClaims(
 	timeoutHeight int64,
 	claimMsgs ...pocktclient.MsgCreateClaim,
 ) error {
+	// DEBUG/TEST: Force claim TX error to test claim_tx_error state transition
+	// Set environment variable TEST_FORCE_CLAIM_TX_ERROR=true to enable
+	if testCfg := getTestConfig(); testCfg.ForceClaimTxError {
+		c.logger.Warn().
+			Msg("TEST MODE: TEST_FORCE_CLAIM_TX_ERROR detected - forcing claim TX error")
+		return fmt.Errorf("TEST MODE: simulated claim transaction error")
+	}
+
 	claims := make([]*prooftypes.MsgCreateClaim, len(claimMsgs))
 	for i, msg := range claimMsgs {
 		claim, ok := msg.(*prooftypes.MsgCreateClaim)
@@ -800,6 +844,14 @@ func (c *HASupplierClient) SubmitProofs(
 	timeoutHeight int64,
 	proofMsgs ...pocktclient.MsgSubmitProof,
 ) error {
+	// DEBUG/TEST: Force proof TX error to test proof_tx_error state transition
+	// Set environment variable TEST_FORCE_PROOF_TX_ERROR=true to enable
+	if testCfg := getTestConfig(); testCfg.ForceProofTxError {
+		c.logger.Warn().
+			Msg("TEST MODE: TEST_FORCE_PROOF_TX_ERROR detected - forcing proof TX error")
+		return fmt.Errorf("TEST MODE: simulated proof transaction error")
+	}
+
 	proofs := make([]*prooftypes.MsgSubmitProof, len(proofMsgs))
 	for i, msg := range proofMsgs {
 		proof, ok := msg.(*prooftypes.MsgSubmitProof)

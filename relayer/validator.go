@@ -238,14 +238,14 @@ func (rv *relayValidator) CheckRewardEligibility(
 	// WARN: Relay arrived in last block of session (risky - might not process in time)
 	// This helps identify applications that are cutting it too close
 	if currentHeight == sessionEndHeight {
-		rv.logger.Warn().
+		rv.logger.Debug().
 			Str("application", applicationAddress).
 			Str("service_id", serviceID).
 			Int64("session_start", sessionStartHeight).
 			Int64("session_end", sessionEndHeight).
 			Int64("current_height", currentHeight).
 			Int64("grace_period_last_accept", gracePeriodLastAcceptBlock).
-			Msg("RISKY RELAY TIMING: Application sent relay in the LAST BLOCK of session. While accepted, this is risky due to processing latency. Application should send relays earlier in the session to ensure reliable processing.")
+			Msg("RISKY RELAY TIMING: Application sent relay in the LAST BLOCK of session. While this is accepted, could maybe reach the miner too late and get dropped.")
 	}
 
 	return nil

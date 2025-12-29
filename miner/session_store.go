@@ -17,24 +17,75 @@ import (
 type SessionState string
 
 const (
+	// Active lifecycle
 	// SessionStateActive means the session is accepting relays.
 	SessionStateActive SessionState = "active"
 
 	// SessionStateClaiming means the session has been flushed and is waiting for claim submission.
 	SessionStateClaiming SessionState = "claiming"
 
-	// SessionStateClaimed means the claim has been submitted, waiting for proof window.
+	// Claim outcomes
+	// SessionStateClaimed means the claim has been successfully submitted.
 	SessionStateClaimed SessionState = "claimed"
 
+	// SessionStateClaimWindowClosed means the claim window closed before the claim was submitted.
+	SessionStateClaimWindowClosed SessionState = "claim_window_closed"
+
+	// SessionStateClaimTxError means the claim transaction failed (RPC error, gas, signature, etc).
+	SessionStateClaimTxError SessionState = "claim_tx_error"
+
+	// Proof outcomes (only from claimed state)
 	// SessionStateProving means the session is in the proof submission window.
 	SessionStateProving SessionState = "proving"
 
-	// SessionStateSettled means the proof was submitted and accepted.
-	SessionStateSettled SessionState = "settled"
+	// SessionStateProved means the proof transaction was successfully submitted.
+	SessionStateProved SessionState = "proved"
 
-	// SessionStateExpired means the session expired without completing the lifecycle.
-	SessionStateExpired SessionState = "expired"
+	// SessionStateProbabilisticProved means proof was not required and the claim will be settled by protocol.
+	SessionStateProbabilisticProved SessionState = "probabilistic_proved"
+
+	// SessionStateProofWindowClosed means the proof window closed before the proof was submitted.
+	SessionStateProofWindowClosed SessionState = "proof_window_closed"
+
+	// SessionStateProofTxError means the proof transaction failed (RPC error, gas, etc).
+	SessionStateProofTxError SessionState = "proof_tx_error"
 )
+
+// IsTerminal returns true if the state is a terminal state (no further transitions).
+func (s SessionState) IsTerminal() bool {
+	switch s {
+	case SessionStateProved,
+		SessionStateProbabilisticProved,
+		SessionStateClaimWindowClosed,
+		SessionStateClaimTxError,
+		SessionStateProofWindowClosed,
+		SessionStateProofTxError:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsSuccess returns true if the state represents a successful terminal outcome.
+func (s SessionState) IsSuccess() bool {
+	switch s {
+	case SessionStateProved, SessionStateProbabilisticProved:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsFailure returns true if the state represents a failure outcome.
+func (s SessionState) IsFailure() bool {
+	switch s {
+	case SessionStateClaimWindowClosed, SessionStateClaimTxError,
+		SessionStateProofWindowClosed, SessionStateProofTxError:
+		return true
+	default:
+		return false
+	}
+}
 
 // SessionSnapshot captures the state of a session for HA recovery.
 // This is stored in Redis and used by a new leader to recover session state.
@@ -84,6 +135,12 @@ type SessionSnapshot struct {
 
 	// CreatedAt is when the session was created.
 	CreatedAt time.Time `json:"created_at"`
+
+	// Optional on-chain settlement confirmation (hours after session completes)
+	// Populated by settlement monitor when EventClaimSettled/EventClaimExpired arrives
+	SettlementOutcome *string `json:"settlement_outcome,omitempty"` // "settled_proven", "expired", "slashed", "discarded"
+	SettlementHeight  *int64  `json:"settlement_height,omitempty"`  // Block height of settlement event
+	SettlementTxHash  *string `json:"settlement_tx_hash,omitempty"` // Settlement transaction hash (if applicable)
 }
 
 // SessionStore provides Redis-based storage for session snapshots.
@@ -106,6 +163,10 @@ type SessionStore interface {
 
 	// UpdateState atomically updates the state of a session.
 	UpdateState(ctx context.Context, sessionID string, newState SessionState) error
+
+	// UpdateSettlementMetadata updates the optional settlement metadata fields.
+	// This is a non-critical update - session may already be cleaned up.
+	UpdateSettlementMetadata(ctx context.Context, sessionID string, outcome string, height int64) error
 
 	// UpdateWALPosition updates the last WAL entry ID for a session.
 	UpdateWALPosition(ctx context.Context, sessionID string, walEntryID string) error
@@ -415,6 +476,46 @@ func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, n
 	return nil
 }
 
+// UpdateSettlementMetadata updates the optional settlement metadata fields.
+// This is a non-critical update - session may already be cleaned up.
+func (s *RedisSessionStore) UpdateSettlementMetadata(
+	ctx context.Context,
+	sessionID string,
+	outcome string,
+	height int64,
+) error {
+	snapshot, err := s.Get(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to get session snapshot: %w", err)
+	}
+	if snapshot == nil {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	// Update settlement metadata
+	snapshot.SettlementOutcome = &outcome
+	snapshot.SettlementHeight = &height
+	snapshot.LastUpdatedAt = time.Now()
+
+	// Serialize and save (no state index changes)
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("failed to marshal snapshot: %w", err)
+	}
+
+	if err := s.redisClient.Set(ctx, s.sessionKey(sessionID), data, s.config.SessionTTL).Err(); err != nil {
+		return fmt.Errorf("failed to update settlement metadata: %w", err)
+	}
+
+	s.logger.Debug().
+		Str("session_id", sessionID).
+		Str("settlement_outcome", outcome).
+		Int64("settlement_height", height).
+		Msg("updated settlement metadata")
+
+	return nil
+}
+
 // UpdateWALPosition updates the last WAL entry ID for a session.
 func (s *RedisSessionStore) UpdateWALPosition(ctx context.Context, sessionID string, walEntryID string) error {
 	snapshot, err := s.Get(ctx, sessionID)
@@ -450,8 +551,7 @@ func (s *RedisSessionStore) IncrementRelayCount(ctx context.Context, sessionID s
 	// CRITICAL: Reject updates for sessions in terminal states.
 	// This is a defense-in-depth check - the handler should also check state,
 	// but this ensures relay counts can never be modified after claim/settlement.
-	switch snapshot.State {
-	case SessionStateClaimed, SessionStateSettled, SessionStateExpired:
+	if snapshot.State.IsTerminal() {
 		return fmt.Errorf("cannot increment relay count: session %s is in terminal state %s", sessionID, snapshot.State)
 	}
 

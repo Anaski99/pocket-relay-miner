@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +19,54 @@ import (
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
+
+// TestConfig holds test mode flags read once at initialization.
+// These environment variables are only for testing and should not be set in production.
+type TestConfig struct {
+	// ForceClaimTxError forces claim transaction submission to fail (for testing claim error path)
+	ForceClaimTxError bool
+
+	// ForceProofTxError forces proof transaction submission to fail (for testing proof error path)
+	ForceProofTxError bool
+
+	// ClaimDelaySeconds delays claim submission by N seconds (for testing claim window timeout)
+	ClaimDelaySeconds int
+
+	// ProofDelaySeconds delays proof submission by N seconds (for testing proof window timeout)
+	ProofDelaySeconds int
+}
+
+var (
+	testConfig     TestConfig
+	testConfigOnce sync.Once
+)
+
+// getTestConfig returns the test configuration, reading environment variables once.
+func getTestConfig() TestConfig {
+	testConfigOnce.Do(func() {
+		testConfig.ForceClaimTxError = os.Getenv("TEST_FORCE_CLAIM_TX_ERROR") == "true"
+		testConfig.ForceProofTxError = os.Getenv("TEST_FORCE_PROOF_TX_ERROR") == "true"
+
+		if delayStr := os.Getenv("TEST_CLAIM_DELAY_SECONDS"); delayStr != "" {
+			if delay, err := strconv.Atoi(delayStr); err == nil && delay > 0 {
+				testConfig.ClaimDelaySeconds = delay
+			}
+		}
+
+		// Support both TEST_DELAY_PROOF_SECONDS and TEST_PROOF_DELAY_SECONDS for backward compatibility
+		if delayStr := os.Getenv("TEST_DELAY_PROOF_SECONDS"); delayStr != "" {
+			if delay, err := strconv.Atoi(delayStr); err == nil && delay > 0 {
+				testConfig.ProofDelaySeconds = delay
+			}
+		}
+		if delayStr := os.Getenv("TEST_PROOF_DELAY_SECONDS"); delayStr != "" {
+			if delay, err := strconv.Atoi(delayStr); err == nil && delay > 0 {
+				testConfig.ProofDelaySeconds = delay
+			}
+		}
+	})
+	return testConfig
+}
 
 // LifecycleCallbackConfig contains configuration for the lifecycle callback.
 type LifecycleCallbackConfig struct {
@@ -461,16 +511,16 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 
 			// Mark all sessions in this group as failed (metrics + Redis state for HA)
 			for _, snapshot := range groupSnapshots {
-				RecordSessionFailed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "claim_window_insufficient_time")
+				RecordClaimWindowClosed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
 
 				// CRITICAL: Update session state in Redis immediately for HA compatibility
 				// If this miner crashes, the new leader must know this session already failed
 				if lc.sessionCoordinator != nil {
-					if expireErr := lc.sessionCoordinator.OnSessionExpired(ctx, snapshot.SessionID, "claim_window_insufficient_time"); expireErr != nil {
+					if err := lc.sessionCoordinator.OnClaimWindowClosed(ctx, snapshot.SessionID); err != nil {
 						logger.Warn().
-							Err(expireErr).
+							Err(err).
 							Str("session_id", snapshot.SessionID).
-							Msg("failed to mark session as expired in Redis")
+							Msg("failed to mark session as claim_window_closed in Redis")
 					}
 				}
 			}
@@ -485,6 +535,27 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			Int64("current_height", currentBlock.Height()).
 			Int64("blocks_remaining", claimWindowClose-currentBlock.Height()).
 			Msg("claim window timing reached - flushing SMSTs and submitting batched claims")
+
+		// DEBUG/TEST: Intentionally delay claim submission to test claim window timeout tracking
+		// Set environment variable TEST_CLAIM_DELAY_SECONDS to enable (e.g., "60" for 60 seconds)
+		// This simulates scenarios where SMST flushing takes too long or network delays occur
+		if testCfg := getTestConfig(); testCfg.ClaimDelaySeconds > 0 {
+			delayDuration := time.Duration(testCfg.ClaimDelaySeconds) * time.Second
+			logger.Warn().
+				Int("delay_seconds", testCfg.ClaimDelaySeconds).
+				Int64("claim_window_close", claimWindowClose).
+				Int64("current_height", currentBlock.Height()).
+				Msg("TEST MODE: Intentionally delaying claim submission to test window timeout tracking")
+			time.Sleep(delayDuration)
+
+			// Log current state after delay
+			postDelayHeight := lc.blockClient.LastBlock(ctx).Height()
+			logger.Warn().
+				Int64("height_after_delay", postDelayHeight).
+				Int64("claim_window_close", claimWindowClose).
+				Bool("window_still_open", postDelayHeight < claimWindowClose).
+				Msg("TEST MODE: Delay complete, continuing with claim submission")
+		}
 
 		// Build all claims for this group (PARALLELIZED for performance)
 		// Pre-filter sessions for validation before parallel processing
@@ -507,7 +578,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					Str(logging.FieldSessionID, snapshot.SessionID).
 					Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
 					Msg("skipping claim - session has 0 relays")
-				RecordSessionFailed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "zero_relays")
+					// Session remains in active state - not a failure, just skipped
 				continue // Skip this session
 			}
 
@@ -517,7 +588,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
 					Int64("relay_count", snapshot.RelayCount).
 					Msg("skipping claim - session has 0 compute units despite having relays")
-				RecordSessionFailed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "zero_value")
+					// Session remains in active state - not a failure, just skipped
 				continue // Skip this session
 			}
 
@@ -539,7 +610,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 						Uint64("total_compute_units", snapshot.TotalComputeUnits).
 						Msg("skipping claim - estimated fee exceeds expected reward (unprofitable)")
 
-					RecordSessionFailed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "unprofitable")
+						// Session remains in active state - not a failure, just skipped
 					continue // Skip this session
 				}
 
@@ -645,19 +716,19 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				Int64("claim_window_close", claimWindowClose).
 				Int64("session_end_height", sessionEndHeight).
 				Int("batch_size", len(claimMsgs)).
-				Msg("claim window closed while building claims - cannot submit (sessions will be marked as failed)")
+				Msg("claim window closed while building claims - cannot submit")
 
 			// Mark all sessions in this batch as failed (metrics + Redis state for HA)
 			for _, snapshot := range groupSnapshots {
-				RecordSessionFailed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "claim_window_closed")
+				RecordClaimWindowClosed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
 
 				// CRITICAL: Update session state in Redis immediately for HA compatibility
 				if lc.sessionCoordinator != nil {
-					if expireErr := lc.sessionCoordinator.OnSessionExpired(ctx, snapshot.SessionID, "claim_window_closed"); expireErr != nil {
+					if err := lc.sessionCoordinator.OnClaimWindowClosed(ctx, snapshot.SessionID); err != nil {
 						logger.Warn().
-							Err(expireErr).
+							Err(err).
 							Str("session_id", snapshot.SessionID).
-							Msg("failed to mark session as expired in Redis")
+							Msg("failed to mark session as claim_window_closed in Redis")
 					}
 				}
 			}
@@ -692,15 +763,15 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 
 					// Mark all sessions in this batch as failed (metrics + Redis state for HA)
 					for _, snapshot := range groupSnapshots {
-						RecordSessionFailed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "claim_window_closed")
+						RecordClaimWindowClosed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
 
 						// CRITICAL: Update session state in Redis immediately for HA compatibility
 						if lc.sessionCoordinator != nil {
-							if expireErr := lc.sessionCoordinator.OnSessionExpired(ctx, snapshot.SessionID, "claim_window_closed"); expireErr != nil {
+							if err := lc.sessionCoordinator.OnClaimWindowClosed(ctx, snapshot.SessionID); err != nil {
 								logger.Warn().
-									Err(expireErr).
+									Err(err).
 									Str("session_id", snapshot.SessionID).
-									Msg("failed to mark session as expired in Redis")
+									Msg("failed to mark session as claim_window_closed in Redis")
 							}
 						}
 					}
@@ -744,6 +815,57 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 								Str("session_id", snapshot.SessionID).
 								Str("claim_tx_hash", claimTxHash).
 								Msg("failed to update snapshot after claim")
+						}
+					}
+
+					// Update in-memory snapshot with claimed root hash (for proof requirement check below)
+					validSnapshots[i].ClaimedRootHash = groupRootHashes[i]
+				}
+
+				// Check if proof is required for each session
+				// If NOT required, immediately transition to probabilistic_proved
+				if lc.proofChecker != nil && lc.sessionCoordinator != nil {
+					// Calculate proof requirement seed block height
+					// MUST match validator logic: seed = proof_window_open - 1
+					proofWindowOpenHeight := sharedtypes.GetProofWindowOpenHeight(sharedParams, validSnapshots[0].SessionEndHeight)
+					proofRequirementSeedHeight := proofWindowOpenHeight - 1
+
+					// Wait for the seed block (non-blocking if already available)
+					proofWindowSeedBlock, err := lc.waitForBlock(ctx, proofRequirementSeedHeight)
+					if err != nil {
+						logger.Warn().
+							Err(err).
+							Int64("seed_height", proofRequirementSeedHeight).
+							Int64("proof_window_open_height", proofWindowOpenHeight).
+							Msg("failed to get proof requirement seed block - cannot check proof requirement (will rely on state machine)")
+					} else {
+						for _, snapshot := range validSnapshots {
+							required, checkErr := lc.proofChecker.IsProofRequired(ctx, snapshot, proofWindowSeedBlock.Hash())
+							if checkErr != nil {
+								logger.Warn().
+									Err(checkErr).
+									Str("session_id", snapshot.SessionID).
+									Msg("failed to check proof requirement (will rely on state machine)")
+								continue
+							}
+
+							if !required {
+								// Proof NOT required → immediately transition to probabilistic_proved
+								logger.Info().
+									Str("session_id", snapshot.SessionID).
+									Msg("proof not required - marking as probabilistically proved")
+
+								if probErr := lc.sessionCoordinator.OnProbabilisticProved(ctx, snapshot.SessionID); probErr != nil {
+									logger.Warn().
+										Err(probErr).
+										Str("session_id", snapshot.SessionID).
+										Msg("failed to mark session as probabilistic_proved")
+								}
+							} else {
+								logger.Info().
+									Str("session_id", snapshot.SessionID).
+									Msg("proof required - session will enter proof phase")
+							}
 						}
 					}
 				}
@@ -801,9 +923,19 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		}
 
 		if lastErr != nil {
+			// Mark all sessions as failed due to claim TX error (after exhausting retries)
 			for _, snapshot := range groupSnapshots {
-				RecordClaimError(snapshot.SupplierOperatorAddress, "exhausted_retries")
-				RecordRevenueLost(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "claim_exhausted_retries", snapshot.TotalComputeUnits, snapshot.RelayCount)
+				RecordClaimTxError(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
+
+				// CRITICAL: Update session state in Redis immediately for HA compatibility
+				if lc.sessionCoordinator != nil {
+					if err := lc.sessionCoordinator.OnClaimTxError(ctx, snapshot.SessionID); err != nil {
+						logger.Warn().
+							Err(err).
+							Str("session_id", snapshot.SessionID).
+							Msg("failed to mark session as claim_tx_error in Redis")
+					}
+				}
 			}
 
 			// Track failed claim submissions to Redis for debugging
@@ -857,6 +989,17 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		Str(logging.FieldSupplier, firstSnapshot.SupplierOperatorAddress).
 		Int("batch_size", len(snapshots)).
 		Logger()
+
+	// TEST MODE: Delay proof submission to simulate slow proof generation or test window timeout
+	if testCfg := getTestConfig(); testCfg.ProofDelaySeconds > 0 {
+		logger.Warn().
+			Int("delay_seconds", testCfg.ProofDelaySeconds).
+			Msg("TEST MODE: delaying proof submission")
+		time.Sleep(time.Duration(testCfg.ProofDelaySeconds) * time.Second)
+		logger.Warn().
+			Int("delay_seconds", testCfg.ProofDelaySeconds).
+			Msg("TEST MODE: proof delay complete, continuing with submission")
+	}
 
 	logger.Debug().Msg("batched sessions need proofs - starting proof process")
 
@@ -1045,21 +1188,20 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				Int64("proof_window_close", proofWindowClose).
 				Int64("session_end_height", sessionEndHeight).
 				Int("group_size", len(sessionsNeedingProof)).
-				Msg("proof window already closed - cannot submit proofs (sessions will be marked as failed)")
+				Msg("proof window already closed - cannot submit proofs")
 
 			// Mark all sessions in this group as failed (metrics + Redis state for HA)
 			for _, snapshot := range sessionsNeedingProof {
-				RecordProofError(snapshot.SupplierOperatorAddress, "proof_window_closed")
-				RecordRevenueLost(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "proof_window_closed", snapshot.TotalComputeUnits, snapshot.RelayCount)
+				RecordProofWindowClosed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
 
 				// CRITICAL: Update session state in Redis immediately for HA compatibility
 				// If this miner crashes, the new leader must know this session already failed
 				if lc.sessionCoordinator != nil {
-					if expireErr := lc.sessionCoordinator.OnSessionExpired(ctx, snapshot.SessionID, "proof_window_closed"); expireErr != nil {
+					if err := lc.sessionCoordinator.OnProofWindowClosed(ctx, snapshot.SessionID); err != nil {
 						logger.Warn().
-							Err(expireErr).
+							Err(err).
 							Str("session_id", snapshot.SessionID).
-							Msg("failed to mark session as expired in Redis")
+							Msg("failed to mark session as proof_window_closed in Redis")
 					}
 				}
 			}
@@ -1085,11 +1227,21 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 						Msg("failed to re-check proof requirement before submission, will attempt submission anyway")
 					stillNeedingProof = append(stillNeedingProof, snapshot)
 				} else if !required {
-					// Proof NO LONGER required - blockchain already settled without proof
+					// Proof NO LONGER required - blockchain settled claim without proof
 					logger.Info().
 						Str("session_id", snapshot.SessionID).
-						Msg("proof no longer required (blockchain settled claim without proof) - skipping proof submission")
-					RecordRevenueProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
+						Msg("proof not required (blockchain settled claim without proof)")
+
+					RecordRevenueProbabilisticProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
+
+					if lc.sessionCoordinator != nil {
+						if err := lc.sessionCoordinator.OnProbabilisticProved(ctx, snapshot.SessionID); err != nil {
+							logger.Warn().
+								Err(err).
+								Str("session_id", snapshot.SessionID).
+								Msg("failed to mark session as probabilistic_proved")
+						}
+					}
 				} else {
 					// Still required - proceed with proof
 					stillNeedingProof = append(stillNeedingProof, snapshot)
@@ -1113,6 +1265,27 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			Int64("current_height", currentBlock.Height()).
 			Int64("blocks_remaining", proofWindowClose-currentBlock.Height()).
 			Msg("proof window timing reached - generating and submitting batched proofs")
+
+		// DEBUG/TEST: Intentionally delay proof submission to test proof expiration tracking
+		// Set environment variable TEST_PROOF_DELAY_SECONDS to enable (e.g., "60" for 60 seconds)
+		// This simulates scenarios where proof generation takes too long or network delays occur
+		if testCfg := getTestConfig(); testCfg.ProofDelaySeconds > 0 {
+			delayDuration := time.Duration(testCfg.ProofDelaySeconds) * time.Second
+			logger.Warn().
+				Int("delay_seconds", testCfg.ProofDelaySeconds).
+				Int64("proof_window_close", proofWindowClose).
+				Int64("current_height", currentBlock.Height()).
+				Msg("TEST MODE: Intentionally delaying proof submission to test expiration tracking")
+			time.Sleep(delayDuration)
+
+			// Log current state after delay
+			postDelayHeight := lc.blockClient.LastBlock(ctx).Height()
+			logger.Warn().
+				Int64("height_after_delay", postDelayHeight).
+				Int64("proof_window_close", proofWindowClose).
+				Bool("window_still_open", postDelayHeight < proofWindowClose).
+				Msg("TEST MODE: Delay complete, continuing with proof submission")
+		}
 
 		// PARALLEL PROOF BUILDING: Generate proofs and build messages concurrently
 		// Each proof generation is independent and thread-safe
@@ -1215,20 +1388,19 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				Int64("proof_window_close", proofWindowClose).
 				Int64("session_end_height", sessionEndHeight).
 				Int("batch_size", len(proofMsgs)).
-				Msg("proof window closed while building proofs - cannot submit (sessions will be marked as failed)")
+				Msg("proof window closed while building proofs - cannot submit")
 
 			// Mark all sessions in this batch as failed (metrics + Redis state for HA)
 			for _, snapshot := range sessionsNeedingProof {
-				RecordProofError(snapshot.SupplierOperatorAddress, "proof_window_closed")
-				RecordRevenueLost(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "proof_window_closed", snapshot.TotalComputeUnits, snapshot.RelayCount)
+				RecordProofWindowClosed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
 
 				// CRITICAL: Update session state in Redis immediately for HA compatibility
 				if lc.sessionCoordinator != nil {
-					if expireErr := lc.sessionCoordinator.OnSessionExpired(ctx, snapshot.SessionID, "proof_window_closed"); expireErr != nil {
+					if err := lc.sessionCoordinator.OnProofWindowClosed(ctx, snapshot.SessionID); err != nil {
 						logger.Warn().
-							Err(expireErr).
+							Err(err).
 							Str("session_id", snapshot.SessionID).
-							Msg("failed to mark session as expired in Redis")
+							Msg("failed to mark session as proof_window_closed in Redis")
 					}
 				}
 			}
@@ -1263,16 +1435,15 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 
 					// Mark all sessions in this batch as failed (metrics + Redis state for HA)
 					for _, snapshot := range sessionsNeedingProof {
-						RecordProofError(snapshot.SupplierOperatorAddress, "proof_window_closed")
-						RecordRevenueLost(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "proof_window_closed", snapshot.TotalComputeUnits, snapshot.RelayCount)
+						RecordProofWindowClosed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
 
 						// CRITICAL: Update session state in Redis immediately for HA compatibility
 						if lc.sessionCoordinator != nil {
-							if expireErr := lc.sessionCoordinator.OnSessionExpired(ctx, snapshot.SessionID, "proof_window_closed"); expireErr != nil {
+							if err := lc.sessionCoordinator.OnProofWindowClosed(ctx, snapshot.SessionID); err != nil {
 								logger.Warn().
-									Err(expireErr).
+									Err(err).
 									Str("session_id", snapshot.SessionID).
-									Msg("failed to mark session as expired in Redis")
+									Msg("failed to mark session as proof_window_closed in Redis")
 							}
 						}
 					}
@@ -1309,12 +1480,12 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				// This prevents duplicate submissions if we crash after TX broadcast
 				for _, snapshot := range sessionsNeedingProof {
 					if lc.sessionCoordinator != nil {
-						if updateErr := lc.sessionCoordinator.OnSessionProved(ctx, snapshot.SessionID, proofTxHash); updateErr != nil {
+						if updateErr := lc.sessionCoordinator.OnProofSubmitted(ctx, snapshot.SessionID, proofTxHash); updateErr != nil {
 							logger.Warn().
 								Err(updateErr).
 								Str("session_id", snapshot.SessionID).
 								Str("proof_tx_hash", proofTxHash).
-								Msg("failed to update snapshot after proof")
+								Msg("failed to store proof TX hash")
 						}
 					}
 				}
@@ -1366,9 +1537,19 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		}
 
 		if lastErr != nil {
+			// Mark all sessions as failed due to proof TX error (after exhausting retries)
 			for _, snapshot := range sessionsNeedingProof {
-				RecordProofError(snapshot.SupplierOperatorAddress, "exhausted_retries")
-				RecordRevenueLost(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "proof_exhausted_retries", snapshot.TotalComputeUnits, snapshot.RelayCount)
+				RecordProofTxError(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
+
+				// CRITICAL: Update session state in Redis immediately for HA compatibility
+				if lc.sessionCoordinator != nil {
+					if err := lc.sessionCoordinator.OnProofTxError(ctx, snapshot.SessionID); err != nil {
+						logger.Warn().
+							Err(err).
+							Str("session_id", snapshot.SessionID).
+							Msg("failed to mark session as proof_tx_error in Redis")
+					}
+				}
 			}
 
 			// Track failed proof submissions to Redis for debugging
@@ -1407,17 +1588,17 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 	return nil
 }
 
-// OnSessionSettled is called when a session is fully settled.
+// OnSessionProved is called when a session proof is successfully submitted.
 // It cleans up resources associated with the session.
-func (lc *LifecycleCallback) OnSessionSettled(ctx context.Context, snapshot *SessionSnapshot) error {
+func (lc *LifecycleCallback) OnSessionProved(ctx context.Context, snapshot *SessionSnapshot) error {
 	logger := lc.logger.With().Str(logging.FieldSessionID, snapshot.SessionID).Logger()
 
 	logger.Debug().
 		Int64(logging.FieldCount, snapshot.RelayCount).
-		Msg("session settled - cleaning up")
+		Msg("session proved - cleaning up")
 
-	// Record session settled metrics
-	RecordSessionSettled(snapshot.SupplierOperatorAddress, snapshot.ServiceID)
+	// Record session proved metrics
+	RecordSessionProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID)
 
 	// Clean up session-specific metrics (gauges with session_id label)
 	ClearSessionMetrics(snapshot.SupplierOperatorAddress, snapshot.SessionID, snapshot.ServiceID)
@@ -1436,8 +1617,8 @@ func (lc *LifecycleCallback) OnSessionSettled(ctx context.Context, snapshot *Ses
 
 	// Update snapshot manager
 	if lc.sessionCoordinator != nil {
-		if err := lc.sessionCoordinator.OnSessionSettled(ctx, snapshot.SessionID); err != nil {
-			logger.Warn().Err(err).Msg("failed to update snapshot after settlement")
+		if err := lc.sessionCoordinator.OnSessionProved(ctx, snapshot.SessionID); err != nil {
+			logger.Warn().Err(err).Msg("failed to update snapshot after proof")
 		}
 	}
 
@@ -1447,37 +1628,22 @@ func (lc *LifecycleCallback) OnSessionSettled(ctx context.Context, snapshot *Ses
 	return nil
 }
 
-// OnSessionExpired is called when a session expires without settling.
-// This typically means the claim or proof window was missed.
-func (lc *LifecycleCallback) OnSessionExpired(ctx context.Context, snapshot *SessionSnapshot, reason string) error {
+// OnProbabilisticProved is called when a session is probabilistically proved (no proof required).
+// It cleans up resources associated with the session.
+func (lc *LifecycleCallback) OnProbabilisticProved(ctx context.Context, snapshot *SessionSnapshot) error {
 	logger := lc.logger.With().Str(logging.FieldSessionID, snapshot.SessionID).Logger()
 
-	// Only warn about "rewards lost" if there were actually relays to claim
-	// Sessions with 0 relays have no rewards to lose - use Debug level
-	if snapshot.RelayCount > 0 {
-		logger.Warn().
-			Str(logging.FieldReason, reason).
-			Int64(logging.FieldCount, snapshot.RelayCount).
-			Uint64("compute_units", snapshot.TotalComputeUnits).
-			Msg("session expired - rewards lost")
-	} else {
-		logger.Debug().
-			Str(logging.FieldReason, reason).
-			Msg("session expired with 0 relays - no rewards lost")
-	}
+	logger.Debug().
+		Int64(logging.FieldCount, snapshot.RelayCount).
+		Msg("session probabilistically proved (no proof required) - cleaning up")
 
-	// Record session failed metrics
-	RecordSessionFailed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, reason)
-
-	// Only record revenue lost if there was actually revenue (relays > 0)
-	if snapshot.RelayCount > 0 {
-		RecordRevenueLost(snapshot.SupplierOperatorAddress, snapshot.ServiceID, reason, snapshot.TotalComputeUnits, snapshot.RelayCount)
-	}
+	// Record session outcome
+	RecordSessionProbabilisticProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID)
 
 	// Clean up session-specific metrics (gauges with session_id label)
 	ClearSessionMetrics(snapshot.SupplierOperatorAddress, snapshot.SessionID, snapshot.ServiceID)
 
-	// Clean up SMST
+	// Clean up SMST tree
 	if err := lc.smstManager.DeleteTree(ctx, snapshot.SessionID); err != nil {
 		logger.Warn().Err(err).Msg("failed to delete SMST tree")
 	}
@@ -1489,9 +1655,45 @@ func (lc *LifecycleCallback) OnSessionExpired(ctx context.Context, snapshot *Ses
 		}
 	}
 
+	// Update snapshot manager
+	if lc.sessionCoordinator != nil {
+		if err := lc.sessionCoordinator.OnProbabilisticProved(ctx, snapshot.SessionID); err != nil {
+			logger.Warn().Err(err).Msg("failed to update session coordinator")
+			return err
+		}
+	}
+
 	// Remove session lock
 	lc.removeSessionLock(snapshot.SessionID)
 
+	return nil
+}
+
+// OnClaimWindowClosed is called when a session fails due to claim window timeout.
+func (lc *LifecycleCallback) OnClaimWindowClosed(ctx context.Context, snapshot *SessionSnapshot) error {
+	// Metrics already recorded at failure point, just cleanup
+	lc.removeSessionLock(snapshot.SessionID)
+	return nil
+}
+
+// OnClaimTxError is called when a session fails due to claim transaction error.
+func (lc *LifecycleCallback) OnClaimTxError(ctx context.Context, snapshot *SessionSnapshot) error {
+	// Metrics already recorded at failure point, just cleanup
+	lc.removeSessionLock(snapshot.SessionID)
+	return nil
+}
+
+// OnProofWindowClosed is called when a session fails due to proof window timeout.
+func (lc *LifecycleCallback) OnProofWindowClosed(ctx context.Context, snapshot *SessionSnapshot) error {
+	// Metrics already recorded at failure point, just cleanup
+	lc.removeSessionLock(snapshot.SessionID)
+	return nil
+}
+
+// OnProofTxError is called when a session fails due to proof transaction error.
+func (lc *LifecycleCallback) OnProofTxError(ctx context.Context, snapshot *SessionSnapshot) error {
+	// Metrics already recorded at failure point, just cleanup
+	lc.removeSessionLock(snapshot.SessionID)
 	return nil
 }
 

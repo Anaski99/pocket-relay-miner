@@ -52,6 +52,7 @@ type SupplierWorker struct {
 
 	// Resources created at startup
 	queryClients            *query.Clients
+	redisBlockSubscriber    *cache.RedisBlockSubscriber
 	redisBlockClientAdapter *cache.RedisBlockClientAdapter
 	supplierCache           *cache.SupplierCache
 	txClient                *tx.TxClient
@@ -167,12 +168,12 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 
 	// Create Redis block subscriber (subscribes to block events via Redis pub/sub)
 	// This allows non-leader miners to receive block events published by the leader
-	redisBlockSubscriber := cache.NewRedisBlockSubscriber(
+	w.redisBlockSubscriber = cache.NewRedisBlockSubscriber(
 		w.logger,
 		w.config.RedisClient,
 		nil, // No direct blockchain client - events come from leader via Redis
 	)
-	if err = redisBlockSubscriber.Start(ctx); err != nil {
+	if err = w.redisBlockSubscriber.Start(ctx); err != nil {
 		w.cleanup()
 		return fmt.Errorf("failed to start redis block subscriber: %w", err)
 	}
@@ -182,7 +183,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 	// Pass the RPC client so it can query specific block heights for proof generation
 	w.redisBlockClientAdapter = cache.NewRedisBlockClientAdapter(
 		w.logger,
-		redisBlockSubscriber,
+		w.redisBlockSubscriber,
 		rpcClient, // For GetBlockAtHeight() - critical for proof generation
 	)
 	if err = w.redisBlockClientAdapter.Start(ctx); err != nil {
@@ -388,9 +389,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	if state.SessionStore != nil {
 		snapshot, storeErr := state.SessionStore.Get(ctx, msg.Message.SessionId)
 		if storeErr == nil && snapshot != nil {
-			if snapshot.State == SessionStateClaimed ||
-				snapshot.State == SessionStateSettled ||
-				snapshot.State == SessionStateExpired {
+			if snapshot.State.IsTerminal() {
 				w.logger.Info().
 					Str("session_id", msg.Message.SessionId).
 					Str("supplier", supplierAddr).
@@ -521,6 +520,11 @@ func (w *SupplierWorker) cleanup() {
 	if w.redisBlockClientAdapter != nil {
 		w.redisBlockClientAdapter.Close() // Close() doesn't return error
 		w.redisBlockClientAdapter = nil
+	}
+
+	if w.redisBlockSubscriber != nil {
+		w.redisBlockSubscriber.Close()
+		w.redisBlockSubscriber = nil
 	}
 
 	if w.queryClients != nil {

@@ -158,7 +158,38 @@ spec:
           echo "================================================"
           echo "PHASE 4: Waiting for block confirmation..."
           echo "================================================"
-          sleep 3
+
+          # Get current block height
+          START_HEIGHT=$(curl -s http://validator:26657/status 2>/dev/null | grep -o '"latest_block_height":"[0-9]*"' | grep -o '[0-9]*' || echo "0")
+          echo "Current block height: $START_HEIGHT"
+          echo "Waiting for 3 blocks to be mined to ensure all transactions are included..."
+
+          # Wait for at least 3 blocks to be mined (block time ~2s, so 3 blocks = 6s + buffer)
+          TARGET_HEIGHT=$((START_HEIGHT + 3))
+          TIMEOUT=30
+          ELAPSED=0
+
+          while true; do
+            CURRENT_HEIGHT=$(curl -s http://validator:26657/status 2>/dev/null | grep -o '"latest_block_height":"[0-9]*"' | grep -o '[0-9]*' || echo "0")
+
+            if [ "$CURRENT_HEIGHT" -ge "$TARGET_HEIGHT" ] 2>/dev/null; then
+              echo "✓ Reached block $CURRENT_HEIGHT (target: $TARGET_HEIGHT)"
+              break
+            fi
+
+            if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
+              echo "⚠ Timeout waiting for blocks, but continuing (current: $CURRENT_HEIGHT, target: $TARGET_HEIGHT)"
+              break
+            fi
+
+            echo "Waiting... (current: $CURRENT_HEIGHT, target: $TARGET_HEIGHT)"
+            sleep 2
+            ELAPSED=$((ELAPSED + 2))
+          done
+
+          # Extra buffer to ensure indexing is complete
+          echo "Waiting 2 more seconds for indexing..."
+          sleep 2
 
           echo ""
           echo "================================================"

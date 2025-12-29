@@ -104,22 +104,6 @@ type GlobalLeaderElector struct {
 	wg       sync.WaitGroup
 }
 
-// NewGlobalLeaderElector creates a new global leader elector with default configuration.
-//
-// Parameters:
-//   - logger: Logger instance for this component
-//   - redisClient: Redis client for distributed locking
-//   - instanceID: Unique identifier for this instance (e.g., hostname + UUID)
-//
-// The instance ID should be unique across all miner instances to prevent conflicts.
-func NewGlobalLeaderElector(
-	logger logging.Logger,
-	redisClient *redisutil.Client,
-	instanceID string,
-) *GlobalLeaderElector {
-	return NewGlobalLeaderElectorWithConfig(logger, redisClient, instanceID, DefaultGlobalLeaderElectorConfig())
-}
-
 // NewGlobalLeaderElectorWithConfig creates a new global leader elector with custom configuration.
 //
 // Parameters:
@@ -344,6 +328,25 @@ func (e *GlobalLeaderElector) Close() {
 		e.cancelFn()
 	}
 	e.wg.Wait()
+
+	// Release leader lock on shutdown for faster failover
+	if e.isLeader.Load() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		released, err := e.releaseScript.Run(
+			ctx,
+			e.redisClient,
+			[]string{e.leaderKey},
+			e.instanceID,
+		).Int()
+
+		if err != nil {
+			e.logger.Warn().Err(err).Msg("failed to release leader lock on shutdown")
+		} else if released == 1 {
+			e.logger.Info().Msg("released leader lock on shutdown for faster failover")
+		}
+	}
 
 	e.logger.Info().Msg("global leader elector stopped")
 }

@@ -216,9 +216,9 @@ func (c *SessionCoordinator) OnSessionClaimed(
 	return nil
 }
 
-// OnSessionProved should be called when a session's proof is submitted.
-// It updates the session state to proving and stores the proof TX hash.
-func (c *SessionCoordinator) OnSessionProved(
+// OnProofSubmitted should be called when a session's proof TX is broadcast.
+// It stores the proof TX hash for deduplication and tracking.
+func (c *SessionCoordinator) OnProofSubmitted(
 	ctx context.Context,
 	sessionID string,
 	proofTxHash string,
@@ -239,9 +239,8 @@ func (c *SessionCoordinator) OnSessionProved(
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	// Update with proof TX hash
+	// Update with proof TX hash (state is already set to Proving by state machine)
 	snapshot.ProofTxHash = proofTxHash
-	snapshot.State = SessionStateProving
 
 	if err := c.sessionStore.Save(ctx, snapshot); err != nil {
 		return fmt.Errorf("failed to save session snapshot: %w", err)
@@ -250,14 +249,14 @@ func (c *SessionCoordinator) OnSessionProved(
 	c.logger.Debug().
 		Str(logging.FieldSessionID, sessionID).
 		Str("proof_tx_hash", proofTxHash).
-		Msg("session proof submitted")
+		Msg("proof TX hash stored")
 
 	return nil
 }
 
-// OnSessionSettled should be called when a session proof is successfully submitted and settled.
-// It updates the session state to settled.
-func (c *SessionCoordinator) OnSessionSettled(
+// OnSessionProved should be called when a session proof is successfully submitted.
+// It updates the session state to proved.
+func (c *SessionCoordinator) OnSessionProved(
 	ctx context.Context,
 	sessionID string,
 ) error {
@@ -268,29 +267,24 @@ func (c *SessionCoordinator) OnSessionSettled(
 	}
 	c.mu.Unlock()
 
-	// Update state to settled
-	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateSettled); err != nil {
+	// Update state to proved
+	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateProved); err != nil {
 		c.logger.Warn().
 			Err(err).
 			Str(logging.FieldSessionID, sessionID).
-			Msg("failed to update session state to settled")
+			Msg("failed to update session state to proved")
 	}
 
 	c.logger.Debug().
 		Str(logging.FieldSessionID, sessionID).
-		Msg("session settled")
+		Msg("session proved")
 
 	return nil
 }
 
-// OnSessionExpired should be called when a session expires or fails (e.g., window closed).
-// It updates the session state to expired in Redis immediately for HA compatibility.
-// This ensures that if this miner crashes, a new leader knows the session already failed.
-func (c *SessionCoordinator) OnSessionExpired(
-	ctx context.Context,
-	sessionID string,
-	reason string,
-) error {
+// OnClaimWindowClosed marks session as failed due to claim window timeout.
+// Updates state immediately in Redis for HA compatibility.
+func (c *SessionCoordinator) OnClaimWindowClosed(ctx context.Context, sessionID string) error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -298,21 +292,93 @@ func (c *SessionCoordinator) OnSessionExpired(
 	}
 	c.mu.Unlock()
 
-	// Update state to expired immediately (CRITICAL for HA - don't wait for lifecycle tick)
-	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateExpired); err != nil {
-		c.logger.Warn().
-			Err(err).
-			Str(logging.FieldSessionID, sessionID).
-			Str("reason", reason).
-			Msg("failed to update session state to expired")
+	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateClaimWindowClosed); err != nil {
+		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
+			Msg("failed to update session state to claim_window_closed")
 		return err
 	}
 
-	c.logger.Debug().
-		Str(logging.FieldSessionID, sessionID).
-		Str("reason", reason).
-		Msg("session expired")
+	c.logger.Debug().Str(logging.FieldSessionID, sessionID).Msg("claim window closed")
+	return nil
+}
 
+// OnClaimTxError marks session as failed due to claim transaction error.
+// Updates state immediately in Redis for HA compatibility.
+func (c *SessionCoordinator) OnClaimTxError(ctx context.Context, sessionID string) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return fmt.Errorf("session coordinator is closed")
+	}
+	c.mu.Unlock()
+
+	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateClaimTxError); err != nil {
+		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
+			Msg("failed to update session state to claim_tx_error")
+		return err
+	}
+
+	c.logger.Debug().Str(logging.FieldSessionID, sessionID).Msg("claim tx error")
+	return nil
+}
+
+// OnProofWindowClosed marks session as failed due to proof window timeout.
+// Updates state immediately in Redis for HA compatibility.
+func (c *SessionCoordinator) OnProofWindowClosed(ctx context.Context, sessionID string) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return fmt.Errorf("session coordinator is closed")
+	}
+	c.mu.Unlock()
+
+	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateProofWindowClosed); err != nil {
+		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
+			Msg("failed to update session state to proof_window_closed")
+		return err
+	}
+
+	c.logger.Debug().Str(logging.FieldSessionID, sessionID).Msg("proof window closed")
+	return nil
+}
+
+// OnProofTxError marks session as failed due to proof transaction error.
+// Updates state immediately in Redis for HA compatibility.
+func (c *SessionCoordinator) OnProofTxError(ctx context.Context, sessionID string) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return fmt.Errorf("session coordinator is closed")
+	}
+	c.mu.Unlock()
+
+	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateProofTxError); err != nil {
+		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
+			Msg("failed to update session state to proof_tx_error")
+		return err
+	}
+
+	c.logger.Debug().Str(logging.FieldSessionID, sessionID).Msg("proof tx error")
+	return nil
+}
+
+// OnProbabilisticProved marks session as probabilistically proved (no proof required).
+// Updates state immediately in Redis for HA compatibility.
+func (c *SessionCoordinator) OnProbabilisticProved(ctx context.Context, sessionID string) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return fmt.Errorf("session coordinator is closed")
+	}
+	c.mu.Unlock()
+
+	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateProbabilisticProved); err != nil {
+		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
+			Msg("failed to update session state to probabilistic_proved")
+		return err
+	}
+
+	c.logger.Debug().Str(logging.FieldSessionID, sessionID).Msg("probabilistic proved (no proof required)")
 	return nil
 }
 

@@ -33,14 +33,6 @@ type SessionLifecycleConfig struct {
 	CheckInterval time.Duration
 }
 
-// DefaultSessionLifecycleConfig returns sensible defaults.
-func DefaultSessionLifecycleConfig() SessionLifecycleConfig {
-	return SessionLifecycleConfig{
-		CheckIntervalBlocks:      1,
-		MaxConcurrentTransitions: 10,
-	}
-}
-
 // SessionLifecycleCallback defines callbacks for lifecycle events.
 type SessionLifecycleCallback interface {
 	// OnSessionActive is called when a new session starts.
@@ -55,11 +47,23 @@ type SessionLifecycleCallback interface {
 	// All sessions in the batch are submitted in a single transaction for efficiency.
 	OnSessionsNeedProof(ctx context.Context, snapshots []*SessionSnapshot) error
 
-	// OnSessionSettled is called when a session is fully settled.
-	OnSessionSettled(ctx context.Context, snapshot *SessionSnapshot) error
+	// OnSessionProved is called when a session proof is successfully submitted.
+	OnSessionProved(ctx context.Context, snapshot *SessionSnapshot) error
 
-	// OnSessionExpired is called when a session expires without settling.
-	OnSessionExpired(ctx context.Context, snapshot *SessionSnapshot, reason string) error
+	// OnProbabilisticProved is called when a session is probabilistically proved (no proof required).
+	OnProbabilisticProved(ctx context.Context, snapshot *SessionSnapshot) error
+
+	// OnClaimWindowClosed is called when a session fails due to claim window timeout.
+	OnClaimWindowClosed(ctx context.Context, snapshot *SessionSnapshot) error
+
+	// OnClaimTxError is called when a session fails due to claim transaction error.
+	OnClaimTxError(ctx context.Context, snapshot *SessionSnapshot) error
+
+	// OnProofWindowClosed is called when a session fails due to proof window timeout.
+	OnProofWindowClosed(ctx context.Context, snapshot *SessionSnapshot) error
+
+	// OnProofTxError is called when a session fails due to proof transaction error.
+	OnProofTxError(ctx context.Context, snapshot *SessionSnapshot) error
 }
 
 // PendingRelayChecker checks for pending (unconsumed) relays in session streams.
@@ -206,30 +210,31 @@ func (m *SessionLifecycleManager) loadExistingSessions(ctx context.Context) erro
 	defer m.activeSessionsMu.Unlock()
 
 	for _, session := range sessions {
-		// Only track sessions that aren't settled or expired
-		if session.State != SessionStateSettled && session.State != SessionStateExpired {
+		// Only track sessions that aren't in terminal state
+		if !session.State.IsTerminal() {
 			m.activeSessions[session.SessionID] = session
 			sessionSnapshotsLoaded.WithLabelValues(m.config.SupplierAddress).Inc()
 		} else {
-			// Log and track metrics for skipped sessions (settled or expired)
+			// Log and track metrics for skipped sessions (terminal states)
 			// These are historical events from before restart, use DEBUG level
 			sessionSnapshotsSkippedAtStartup.WithLabelValues(m.config.SupplierAddress, string(session.State)).Inc()
 
-			// Differentiate between settled (success) and expired (failure) for operator clarity
-			if session.State == SessionStateSettled {
+			// Differentiate between success and failure for operator clarity
+			if session.State.IsSuccess() {
 				m.logger.Debug().
 					Str("session_id", session.SessionID).
 					Str("service_id", session.ServiceID).
+					Str("state", string(session.State)).
 					Int64("session_end_height", session.SessionEndHeight).
 					Int64("relay_count", session.RelayCount).
 					Uint64("compute_units", session.TotalComputeUnits).
-					Msg("skipping session at startup: already settled (rewards claimed)")
-			} else {
-				// Expired without settling - historical data (actual WARN was logged when it expired)
+					Msg("skipping session at startup: already completed (rewards claimed or proved)")
+			} else if session.State.IsFailure() {
+				// Failed session - historical data (actual WARN was logged when it failed)
 				// Only mention "rewards lost" if there were actually relays
-				msg := "skipping session at startup: expired with 0 relays"
+				msg := "skipping session at startup: failed with 0 relays"
 				if session.RelayCount > 0 {
-					msg = "skipping session at startup: expired without settling (rewards lost)"
+					msg = "skipping session at startup: failed (rewards lost)"
 				}
 				m.logger.Debug().
 					Str("session_id", session.SessionID).
@@ -462,9 +467,9 @@ func (m *SessionLifecycleManager) lifecycleCheckerPolling(ctx context.Context) {
 // checkSessionTransitions checks all active sessions for required state transitions.
 func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, currentHeight int64) {
 	m.activeSessionsMu.RLock()
-	sessions := make([]*SessionSnapshot, 0, len(m.activeSessions))
-	for _, session := range m.activeSessions {
-		sessions = append(sessions, session)
+	sessionIDs := make([]string, 0, len(m.activeSessions))
+	for sessionID := range m.activeSessions {
+		sessionIDs = append(sessionIDs, sessionID)
 	}
 	m.activeSessionsMu.RUnlock()
 
@@ -474,13 +479,28 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 		return
 	}
 
-	// Group sessions by transition type (claiming, proving, settled, expired)
+	// Group sessions by transition type (claiming, proving, terminal states)
 	var claimingSessions []*SessionSnapshot
 	var provingSessions []*SessionSnapshot
-	var settledSessions []*SessionSnapshot
-	var expiredSessions []*SessionSnapshot
+	// Terminal sessions stored as alternating (state, session) pairs for individual handling
+	var terminalSessions []interface{}
 
-	for _, session := range sessions {
+	for _, sessionID := range sessionIDs {
+		// CRITICAL: Reload session from Redis to get latest state (not stale in-memory copy)
+		// Callbacks may have updated state to terminal (e.g., proof_tx_error) which must not be overwritten
+		session, err := m.sessionStore.Get(ctx, sessionID)
+		if err != nil || session == nil {
+			m.logger.Warn().Err(err).Str("session_id", sessionID).Msg("failed to reload session from Redis")
+			continue
+		}
+
+		// CRITICAL: Skip sessions already in terminal states - they should NEVER transition again
+		// Terminal states (proved, probabilistic_proved, claim_tx_error, proof_tx_error, etc.)
+		// represent final outcomes and must not be overwritten by window timeout logic
+		if session.State.IsTerminal() {
+			continue
+		}
+
 		// Check if this session needs a transition
 		newState, _ := m.determineTransition(session, currentHeight, params)
 		if newState == "" || newState == session.State {
@@ -493,10 +513,13 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 			claimingSessions = append(claimingSessions, session)
 		case SessionStateProving:
 			provingSessions = append(provingSessions, session)
-		case SessionStateSettled:
-			settledSessions = append(settledSessions, session)
-		case SessionStateExpired:
-			expiredSessions = append(expiredSessions, session)
+		case SessionStateProbabilisticProved,
+			SessionStateClaimWindowClosed,
+			SessionStateClaimTxError,
+			SessionStateProofWindowClosed,
+			SessionStateProofTxError:
+			// Terminal states: store (state, session) pairs
+			terminalSessions = append(terminalSessions, newState, session)
 		}
 	}
 
@@ -538,20 +561,17 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 		})
 	}
 
-	// Settled and expired are still handled individually (no batching benefit)
-	for _, session := range settledSessions {
-		// Capture for closure
-		capturedSession := session
-		m.transitionSubpool.Submit(func() {
-			m.executeTransition(ctx, capturedSession, SessionStateSettled, "settled")
-		})
-	}
+	// Terminal states handled individually (no batching benefit)
+	// Process pairs: [state, session, state, session, ...]
+	for i := 0; i < len(terminalSessions); i += 2 {
+		newState := terminalSessions[i].(SessionState)
+		session := terminalSessions[i+1].(*SessionSnapshot)
 
-	for _, session := range expiredSessions {
 		// Capture for closure
+		capturedState := newState
 		capturedSession := session
 		m.transitionSubpool.Submit(func() {
-			m.executeTransition(ctx, capturedSession, SessionStateExpired, "expired")
+			m.executeTransition(ctx, capturedSession, capturedState, string(capturedState))
 		})
 	}
 }
@@ -579,9 +599,9 @@ func (m *SessionLifecycleManager) determineTransition(
 			Int64("claim_window_close", claimWindowClose).
 			Msg("evaluating active session window")
 
-		// If claim window has passed without claiming, session expired
+		// If claim window has passed without claiming, window closed
 		if currentHeight >= claimWindowClose {
-			return SessionStateExpired, "claim_window_missed"
+			return SessionStateClaimWindowClosed, "claim_window_timeout"
 		}
 
 		// If we're in the claim window, transition to claiming
@@ -595,36 +615,42 @@ func (m *SessionLifecycleManager) determineTransition(
 		// Transition to claimed happens after callback succeeds
 		claimWindowClose := sharedtypes.GetClaimWindowCloseHeight(params, session.SessionEndHeight)
 
-		// If claim window passed without submitting, expired
+		// If claim window passed without submitting, window closed (fallback if callback didn't run)
 		if currentHeight >= claimWindowClose {
-			return SessionStateExpired, "claim_failed"
+			return SessionStateClaimWindowClosed, "claim_timeout"
 		}
 
 	case SessionStateClaimed:
-		// Check if proof window has opened
+		// IMPORTANT: If we're in claimed state, proof MUST be required.
+		// If proof was NOT required, lifecycle callback would have immediately
+		// transitioned to probabilistic_proved after claim success.
+
 		proofWindowOpen := sharedtypes.GetProofWindowOpenHeight(params, session.SessionEndHeight)
 		proofWindowClose := sharedtypes.GetProofWindowCloseHeight(params, session.SessionEndHeight)
 
-		// If proof window passed without proving, session may still settle
-		// (proof is optional if not selected for proof requirement)
+		// Missed proof window while proof was required → FAILURE
 		if currentHeight >= proofWindowClose {
-			return SessionStateSettled, "proof_window_passed"
+			return SessionStateProofWindowClosed, "proof_timeout"
 		}
 
-		// If we're in the proof window, transition to proving
+		// Proof window open and proof required → GO SUBMIT NOW!
 		// Protocol handles submission timing via GetEarliestSupplierProofCommitHeight()
 		// Pre-submission checks in lifecycle_callback ensure sufficient time remaining
 		if currentHeight >= proofWindowOpen && currentHeight < proofWindowClose {
 			return SessionStateProving, "proof_window_open"
 		}
 
+		// Still waiting for proof window to open
+		// (session remains in claimed state)
+
 	case SessionStateProving:
-		// Transition to settled happens after callback succeeds
+		// Transition happens after callback succeeds
 		proofWindowClose := sharedtypes.GetProofWindowCloseHeight(params, session.SessionEndHeight)
 
-		// If proof window passed, check if settled
+		// ❌ OLD BUG: returned SessionStateSettled on timeout (wrong - proof was required but not submitted!)
+		// ✅ FIX: Proof window closed = failure (fallback if callback didn't run)
 		if currentHeight >= proofWindowClose {
-			return SessionStateSettled, "proof_submitted"
+			return SessionStateProofWindowClosed, "proof_timeout"
 		}
 	}
 
@@ -757,20 +783,20 @@ func (m *SessionLifecycleManager) executeBatchedProofTransition(ctx context.Cont
 		return
 	}
 
-	// Update all sessions and transition to settled
+	// Update all sessions and transition to proved
 	for _, session := range sessions {
 		// Update session state
 		m.activeSessionsMu.Lock()
-		session.State = SessionStateSettled
+		session.State = SessionStateProved
 		session.LastUpdatedAt = time.Now()
 		m.activeSessionsMu.Unlock()
 
 		// Persist the state change
-		if err := m.sessionStore.UpdateState(ctx, session.SessionID, SessionStateSettled); err != nil {
+		if err := m.sessionStore.UpdateState(ctx, session.SessionID, SessionStateProved); err != nil {
 			m.logger.Error().
 				Err(err).
 				Str("session_id", session.SessionID).
-				Msg("failed to persist settled state")
+				Msg("failed to persist proved state")
 			sessionStoreErrors.WithLabelValues(m.config.SupplierAddress, "update_state").Inc()
 			continue
 		}
@@ -779,15 +805,15 @@ func (m *SessionLifecycleManager) executeBatchedProofTransition(ctx context.Cont
 		sessionStateTransitions.WithLabelValues(
 			m.config.SupplierAddress,
 			string(SessionStateProving),
-			string(SessionStateSettled),
+			string(SessionStateProved),
 		).Inc()
 
-		// Call OnSessionSettled for cleanup (stream deletion, SMST cleanup, metrics)
-		if settleErr := m.callback.OnSessionSettled(ctx, session); settleErr != nil {
+		// Call OnSessionProved for cleanup (stream deletion, SMST cleanup, metrics)
+		if proveErr := m.callback.OnSessionProved(ctx, session); proveErr != nil {
 			m.logger.Warn().
-				Err(settleErr).
+				Err(proveErr).
 				Str("session_id", session.SessionID).
-				Msg("settle callback failed in batched transition")
+				Msg("proved callback failed in batched transition")
 		}
 
 		// Remove from active tracking
@@ -822,15 +848,36 @@ func (m *SessionLifecycleManager) executeTransition(
 
 	var err error
 
+	// Execute terminal state callbacks
 	switch newState {
-	case SessionStateSettled:
-		if settleErr := m.callback.OnSessionSettled(ctx, session); settleErr != nil {
-			sessionLogger.Warn().Err(settleErr).Msg("settle callback failed")
+	case SessionStateProved:
+		if err := m.callback.OnSessionProved(ctx, session); err != nil {
+			sessionLogger.Warn().Err(err).Msg("proved callback failed")
 		}
 
-	case SessionStateExpired:
-		if expireErr := m.callback.OnSessionExpired(ctx, session, action); expireErr != nil {
-			sessionLogger.Warn().Err(expireErr).Msg("expire callback failed")
+	case SessionStateProbabilisticProved:
+		if err := m.callback.OnProbabilisticProved(ctx, session); err != nil {
+			sessionLogger.Warn().Err(err).Msg("probabilistic proved callback failed")
+		}
+
+	case SessionStateClaimWindowClosed:
+		if err := m.callback.OnClaimWindowClosed(ctx, session); err != nil {
+			sessionLogger.Warn().Err(err).Msg("claim window closed callback failed")
+		}
+
+	case SessionStateClaimTxError:
+		if err := m.callback.OnClaimTxError(ctx, session); err != nil {
+			sessionLogger.Warn().Err(err).Msg("claim tx error callback failed")
+		}
+
+	case SessionStateProofWindowClosed:
+		if err := m.callback.OnProofWindowClosed(ctx, session); err != nil {
+			sessionLogger.Warn().Err(err).Msg("proof window closed callback failed")
+		}
+
+	case SessionStateProofTxError:
+		if err := m.callback.OnProofTxError(ctx, session); err != nil {
+			sessionLogger.Warn().Err(err).Msg("proof tx error callback failed")
 		}
 	}
 
@@ -855,8 +902,8 @@ func (m *SessionLifecycleManager) executeTransition(
 		string(newState),
 	).Inc()
 
-	// Remove settled/expired sessions from active tracking
-	if newState == SessionStateSettled || newState == SessionStateExpired {
+	// Remove terminal sessions from active tracking
+	if newState.IsTerminal() {
 		m.activeSessionsMu.Lock()
 		delete(m.activeSessions, session.SessionID)
 		m.activeSessionsMu.Unlock()

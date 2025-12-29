@@ -61,7 +61,7 @@ def get_defaults():
             "enabled": True,
             "prometheus": {
                 "port": 9091,
-                "scrape_interval": "10s",
+                "scrape_interval": "2s",
             },
             "grafana": {
                 "port": 3000,
