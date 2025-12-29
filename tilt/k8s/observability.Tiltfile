@@ -242,18 +242,9 @@ kind: ConfigMap
 metadata:
   name: grafana-dashboards
 data:
-  business-economics.json: |
-    {}
-  service-performance.json: |
-    {}
-  operational-health.json: |
-    {}
   unified-overview.json: |
     {}
 """.format(
-        dashboard_business_economics.replace("\n", "\n    "),
-        dashboard_service_performance.replace("\n", "\n    "),
-        dashboard_operational_health.replace("\n", "\n    "),
         dashboard_unified_overview.replace("\n", "\n    ")
     )
 
