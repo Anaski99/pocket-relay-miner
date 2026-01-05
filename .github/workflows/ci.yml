@@ -127,7 +127,7 @@ jobs:
           context: .
           push: false
           platforms: linux/amd64
-          tags: ghcr.io/pokt-network/pocket-relay-miner:test-amd64
+          tags: ghcr.io/anaski99/pocket-relay-miner:test-amd64
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
             COMMIT=${{ steps.meta.outputs.commit }}
@@ -164,7 +164,7 @@ jobs:
           context: .
           push: false
           platforms: linux/arm64
-          tags: ghcr.io/pokt-network/pocket-relay-miner:test-arm64
+          tags: ghcr.io/anaski99/pocket-relay-miner:test-arm64
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
             COMMIT=${{ steps.meta.outputs.commit }}
