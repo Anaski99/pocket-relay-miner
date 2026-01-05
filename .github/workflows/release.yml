@@ -43,22 +43,22 @@ jobs:
             # Git tag (e.g., v1.0.0) → version tag + latest
             # Example: v1.0.0 → tags: 1.0.0, latest
             VERSION_TAG=$(echo $GITHUB_REF | sed 's|refs/tags/v||')
-            TAGS="ghcr.io/pokt-network/pocket-relay-miner:${VERSION_TAG},ghcr.io/pokt-network/pocket-relay-miner:latest"
+            TAGS="ghcr.io/anaski99/pocket-relay-miner:${VERSION_TAG},ghcr.io/anaski99/pocket-relay-miner:latest"
             echo "🚀 Production Release: ${VERSION_TAG}"
           elif [[ $GITHUB_REF == refs/heads/main ]]; then
             # Main branch → version + rc tag
             # Example: main → tags: bd0f982, rc
-            TAGS="ghcr.io/pokt-network/pocket-relay-miner:${VERSION},ghcr.io/pokt-network/pocket-relay-miner:rc"
+            TAGS="ghcr.io/anaski99/pocket-relay-miner:${VERSION},ghcr.io/anaski99/pocket-relay-miner:rc"
             echo "📦 Release Candidate: ${VERSION}"
           elif [[ $GITHUB_REF == refs/heads/dev ]]; then
             # Dev branch → dev tag only (always latest dev)
             # Example: dev → tag: dev
-            TAGS="ghcr.io/pokt-network/pocket-relay-miner:dev"
+            TAGS="ghcr.io/anaski99/pocket-relay-miner:dev"
             echo "🔧 Development Build: ${VERSION}"
           else
             # Fallback for other branches
             BRANCH_NAME=$(echo $GITHUB_REF | sed 's|refs/heads/||')
-            TAGS="ghcr.io/pokt-network/pocket-relay-miner:${BRANCH_NAME}-${VERSION}"
+            TAGS="ghcr.io/anaski99/pocket-relay-miner:${BRANCH_NAME}-${VERSION}"
             echo "🌿 Branch Build: ${BRANCH_NAME}-${VERSION}"
           fi
 
@@ -90,7 +90,7 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64
-          tags: ghcr.io/pokt-network/pocket-relay-miner:${{ needs.metadata.outputs.version }}-amd64
+          tags: ghcr.io/anaski99/pocket-relay-miner:${{ needs.metadata.outputs.version }}-amd64
           build-args: |
             VERSION=${{ needs.metadata.outputs.version }}
             COMMIT=${{ needs.metadata.outputs.commit }}
@@ -133,7 +133,7 @@ jobs:
           context: .
           push: true
           platforms: linux/arm64
-          tags: ghcr.io/pokt-network/pocket-relay-miner:${{ needs.metadata.outputs.version }}-arm64
+          tags: ghcr.io/anaski99/pocket-relay-miner:${{ needs.metadata.outputs.version }}-arm64
           build-args: |
             VERSION=${{ needs.metadata.outputs.version }}
             COMMIT=${{ needs.metadata.outputs.commit }}
@@ -171,8 +171,8 @@ jobs:
           for TAG in "${TAG_ARRAY[@]}"; do
             echo "Creating manifest for: $TAG"
             docker buildx imagetools create -t "$TAG" \
-              ghcr.io/pokt-network/pocket-relay-miner:${{ needs.metadata.outputs.version }}-amd64 \
-              ghcr.io/pokt-network/pocket-relay-miner:${{ needs.metadata.outputs.version }}-arm64
+              ghcr.io/anaski99/pocket-relay-miner:${{ needs.metadata.outputs.version }}-amd64 \
+              ghcr.io/anaski99/pocket-relay-miner:${{ needs.metadata.outputs.version }}-arm64
           done
 
   release:
@@ -208,13 +208,13 @@ jobs:
 
           **Multi-arch images available:**
           \`\`\`bash
-          docker pull ghcr.io/pokt-network/pocket-relay-miner:${VERSION_NUMBER}
-          docker pull ghcr.io/pokt-network/pocket-relay-miner:latest
+          docker pull ghcr.io/anaski99/pocket-relay-miner:${VERSION_NUMBER}
+          docker pull ghcr.io/anaski99/pocket-relay-miner:latest
           \`\`\`
 
           **Architecture-specific:**
-          - AMD64: \`ghcr.io/pokt-network/pocket-relay-miner:${VERSION_NUMBER}-amd64\`
-          - ARM64: \`ghcr.io/pokt-network/pocket-relay-miner:${VERSION_NUMBER}-arm64\`
+          - AMD64: \`ghcr.io/anaski99/pocket-relay-miner:${VERSION_NUMBER}-amd64\`
+          - ARM64: \`ghcr.io/anaski99/pocket-relay-miner:${VERSION_NUMBER}-arm64\`
 
           ## What's Changed
 
