@@ -11,7 +11,7 @@ BUILD_DIR=bin
 BACKEND_DIR=tilt/backend-server
 
 # Docker image configuration
-DOCKER_IMAGE?=ghcr.io/pokt-network/pocket-relay-miner:rc
+DOCKER_IMAGE?=ghcr.io/anaski99/pocket-relay-miner:rc
 
 # Version information
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
