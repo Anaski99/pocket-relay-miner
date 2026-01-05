@@ -469,26 +469,16 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			return nil, fmt.Errorf("failed to wait for claim window open: %w", blockErr)
 		}
 
-		// Calculate the earliest claim commit height for this supplier (timing spread)
-		// Use interface method - block hash not needed since poktroll ignores it currently
-		earliestClaimHeight, err := lc.sharedClient.GetEarliestSupplierClaimCommitHeight(
-			ctx,
-			sessionEndHeight,
-			firstSnapshot.SupplierOperatorAddress,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to calculate earliest claim height: %w", err)
-		}
+		// NOTE: Timing spread DISABLED - submit claims immediately when window opens
+		// The protocol's GetEarliestSupplierClaimCommitHeight() spreads suppliers across the window,
+		// but this can cause claims to be submitted too close to window close, resulting in failures.
+		// We now submit immediately when the claim window opens to maximize success rate.
+		earliestClaimHeight := claimWindowOpenHeight // Use window open, not spread height
 
-		logger.Debug().
-			Int64("earliest_claim_height", earliestClaimHeight).
+		logger.Info().
+			Int64("claim_window_open", claimWindowOpenHeight).
 			Int64("session_end_height", sessionEndHeight).
-			Msg("waiting for assigned claim timing")
-
-		// Wait for the earliest claim height (timing spread ensures suppliers don't all submit at once)
-		if _, waitErr := lc.waitForBlock(ctx, earliestClaimHeight); waitErr != nil {
-			return nil, fmt.Errorf("failed to wait for claim timing: %w", waitErr)
-		}
+			Msg("claim window open - submitting immediately (timing spread disabled)")
 
 		// CRITICAL: Verify claim window is still open AND we have enough time to build+submit
 		// AGGRESSIVE MODE: Push claims until the very last block of the window
@@ -497,9 +487,9 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		blocksRemaining := claimWindowClose - currentBlock.Height()
 
 		// AGGRESSIVE: No buffer - use every available block in the window
-		const minBlocksRequired = 0
+		const minBlocksRequired = 2
 
-		if blocksRemaining < minBlocksRequired {
+		if blocksRemaining <= minBlocksRequired {
 			logger.Error().
 				Int64("current_height", currentBlock.Height()).
 				Int64("claim_window_close", claimWindowClose).
@@ -1128,24 +1118,20 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			continue
 		}
 
-		// Calculate the earliest proof commit height for this supplier (timing spread)
-		// Use interface method - block hash not needed since poktroll ignores it currently
-		earliestProofHeight, err := lc.sharedClient.GetEarliestSupplierProofCommitHeight(
-			ctx,
-			sessionEndHeight,
-			firstSnapshot.SupplierOperatorAddress,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to calculate earliest proof height: %w", err)
-		}
+		// NOTE: Timing spread DISABLED - submit proofs immediately when window opens
+		// The protocol's GetEarliestSupplierProofCommitHeight() spreads suppliers across the window,
+		// but this can cause proofs to be submitted too close to window close, resulting in failures.
+		// We now submit immediately when the proof window opens to maximize success rate.
+		earliestProofHeight := proofWindowOpenHeight // Use window open, not spread height
 
-		logger.Debug().
-			Int64("earliest_proof_height", earliestProofHeight).
+		logger.Info().
+			Int64("proof_window_open", proofWindowOpenHeight).
 			Int64("session_end_height", sessionEndHeight).
 			Int("proofs_to_submit", len(sessionsNeedingProof)).
-			Msg("waiting for assigned proof timing")
+			Msg("proof window open - submitting immediately (timing spread disabled)")
 
 		// Calculate proof path seed block height (one before earliest proof height)
+		// Since we're using proofWindowOpenHeight, this equals proofRequirementSeedHeight
 		proofPathSeedBlockHeight := earliestProofHeight - 1
 
 		// Optimization: Reuse the seed block we already fetched for proof requirement check
