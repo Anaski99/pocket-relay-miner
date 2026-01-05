@@ -496,8 +496,9 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		currentBlock := lc.blockClient.LastBlock(ctx)
 		blocksRemaining := claimWindowClose - currentBlock.Height()
 
-		// AGGRESSIVE: No buffer - use every available block in the window
-		const minBlocksRequired = 0
+		// AGGRESSIVE: Use a small buffer to account for SMST flush time
+		// We need at least 1 block to submit, plus 1 block buffer for building/flushing
+		const minBlocksRequired = 2
 
 		if blocksRemaining < minBlocksRequired {
 			logger.Error().
