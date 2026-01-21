@@ -762,9 +762,16 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			sessionCoordinator.SetOnSessionCreatedCallback(func(ctx context.Context, snapshot *SessionSnapshot) error {
 				return lm.TrackSession(ctx, snapshot)
 			})
-			m.logger.Debug().
+
+			// Wire up terminal state callback so in-memory state is updated atomically with Redis
+			// This prevents session leak where terminal sessions stay in activeSessions
+			sessionCoordinator.SetOnSessionTerminalCallback(func(sessionID string, state SessionState) {
+				lm.RemoveSession(sessionID)
+			})
+
+			m.logger.Info().
 				Str(logging.FieldSupplier, operatorAddr).
-				Msg("wired session creation callback to lifecycle manager")
+				Msg("session_lifecycle_callbacks_wired: creation and terminal callbacks registered for atomic state updates")
 		}
 	} else {
 		m.logger.Warn().

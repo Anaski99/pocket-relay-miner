@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/alitto/pond/v2"
+	"github.com/puzpuzpuz/xsync/v4"
+
 	localclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/poktroll/pkg/client"
@@ -128,9 +130,8 @@ type SessionLifecycleManager struct {
 	sharedParams   *sharedtypes.Params
 	sharedParamsMu sync.RWMutex
 
-	// Active sessions being monitored
-	activeSessions   map[string]*SessionSnapshot // sessionID -> snapshot
-	activeSessionsMu sync.RWMutex
+	// Active sessions being monitored (lock-free concurrent map)
+	activeSessions *xsync.Map[string, *SessionSnapshot]
 
 	// Pond subpool for controlled concurrency during transitions
 	transitionSubpool pond.Pool
@@ -178,7 +179,7 @@ func NewSessionLifecycleManager(
 		blockClient:       blockClient,
 		callback:          callback,
 		pendingChecker:    pendingChecker,
-		activeSessions:    make(map[string]*SessionSnapshot),
+		activeSessions:    xsync.NewMap[string, *SessionSnapshot](),
 		transitionSubpool: transitionSubpool,
 	}
 }
@@ -213,12 +214,13 @@ func (m *SessionLifecycleManager) Start(ctx context.Context) error {
 	// LATE SESSION PRIORITIZATION: Check for sessions needing immediate attention
 	// If we have loaded sessions and any are past their claim window, process them now
 	// instead of waiting for the next block event (could be 10+ seconds)
-	if len(m.activeSessions) > 0 {
+	sessionCount := m.activeSessions.Size()
+	if sessionCount > 0 {
 		block := m.blockClient.LastBlock(ctx)
 		if block != nil {
 			m.logger.Debug().
 				Int64("current_height", block.Height()).
-				Int("loaded_sessions", len(m.activeSessions)).
+				Int("loaded_sessions", sessionCount).
 				Msg("checking for late sessions on startup")
 			m.checkSessionTransitions(ctx, block.Height())
 		}
@@ -229,7 +231,7 @@ func (m *SessionLifecycleManager) Start(ctx context.Context) error {
 	go m.lifecycleChecker(m.ctx)
 
 	m.logger.Info().
-		Int("active_sessions", len(m.activeSessions)).
+		Int("active_sessions", sessionCount).
 		Msg("session lifecycle manager started")
 
 	return nil
@@ -242,13 +244,10 @@ func (m *SessionLifecycleManager) loadExistingSessions(ctx context.Context) erro
 		return err
 	}
 
-	m.activeSessionsMu.Lock()
-	defer m.activeSessionsMu.Unlock()
-
 	for _, session := range sessions {
 		// Only track sessions that aren't in terminal state
 		if !session.State.IsTerminal() {
-			m.activeSessions[session.SessionID] = session
+			m.activeSessions.Store(session.SessionID, session)
 			sessionSnapshotsLoaded.WithLabelValues(m.config.SupplierAddress).Inc()
 		} else {
 			// Log and track metrics for skipped sessions (terminal states)
@@ -317,9 +316,7 @@ func (m *SessionLifecycleManager) TrackSession(ctx context.Context, snapshot *Se
 	}
 	m.mu.RUnlock()
 
-	m.activeSessionsMu.Lock()
-	m.activeSessions[snapshot.SessionID] = snapshot
-	m.activeSessionsMu.Unlock()
+	m.activeSessions.Store(snapshot.SessionID, snapshot)
 
 	// Persist to store
 	if err := m.sessionStore.Save(ctx, snapshot); err != nil {
@@ -336,52 +333,61 @@ func (m *SessionLifecycleManager) TrackSession(ctx context.Context, snapshot *Se
 
 // GetSession returns a tracked session by ID.
 func (m *SessionLifecycleManager) GetSession(sessionID string) *SessionSnapshot {
-	m.activeSessionsMu.RLock()
-	defer m.activeSessionsMu.RUnlock()
-	return m.activeSessions[sessionID]
+	session, _ := m.activeSessions.Load(sessionID)
+	return session
+}
+
+// RemoveSession removes a session from in-memory tracking.
+// This is called by the terminal state callback to update in-memory state
+// atomically with Redis updates, preventing session leak.
+func (m *SessionLifecycleManager) RemoveSession(sessionID string) {
+	// Check if session existed before deletion for logging
+	_, existed := m.activeSessions.LoadAndDelete(sessionID)
+	if existed {
+		m.logger.Debug().
+			Str(logging.FieldSessionID, sessionID).
+			Int("remaining_sessions", m.activeSessions.Size()).
+			Msg("session_lifecycle_atomic_remove: session removed via terminal callback")
+	}
 }
 
 // GetActiveSessions returns all sessions in the active state.
 func (m *SessionLifecycleManager) GetActiveSessions() []*SessionSnapshot {
-	m.activeSessionsMu.RLock()
-	defer m.activeSessionsMu.RUnlock()
-
 	result := make([]*SessionSnapshot, 0)
-	for _, session := range m.activeSessions {
+	m.activeSessions.Range(func(sessionID string, session *SessionSnapshot) bool {
 		if session.State == SessionStateActive {
 			result = append(result, session)
 		}
-	}
+		return true // continue iteration
+	})
 	return result
 }
 
 // GetSessionsByState returns all sessions in a given state.
 func (m *SessionLifecycleManager) GetSessionsByState(state SessionState) []*SessionSnapshot {
-	m.activeSessionsMu.RLock()
-	defer m.activeSessionsMu.RUnlock()
-
 	result := make([]*SessionSnapshot, 0)
-	for _, session := range m.activeSessions {
+	m.activeSessions.Range(func(sessionID string, session *SessionSnapshot) bool {
 		if session.State == state {
 			result = append(result, session)
 		}
-	}
+		return true // continue iteration
+	})
 	return result
 }
 
 // UpdateSessionRelayCount updates the relay count for a session.
 func (m *SessionLifecycleManager) UpdateSessionRelayCount(ctx context.Context, sessionID string, computeUnits uint64) error {
-	m.activeSessionsMu.Lock()
-	session, exists := m.activeSessions[sessionID]
+	session, exists := m.activeSessions.Load(sessionID)
 	if !exists {
-		m.activeSessionsMu.Unlock()
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
+	// Note: xsync.Map provides atomic Load/Store, but the session fields are still being
+	// modified. Since each session is only modified by one goroutine at a time
+	// (relay processing is serialized per session), this is safe.
 	session.RelayCount++
 	session.TotalComputeUnits += computeUnits
 	session.LastUpdatedAt = time.Now()
-	m.activeSessionsMu.Unlock()
 
 	// Persist update asynchronously
 	go func() {
@@ -500,19 +506,79 @@ func (m *SessionLifecycleManager) lifecycleCheckerPolling(ctx context.Context) {
 	}
 }
 
+// sessionMightNeedTransition performs a quick in-memory check to determine if a session
+// MIGHT need a transition at the current block height. This is an optimization to avoid
+// unnecessary Redis calls for sessions that can't possibly transition yet.
+//
+// This check is conservative - it may return true for sessions that ultimately don't
+// transition, but it should never return false for sessions that DO need to transition.
+func (m *SessionLifecycleManager) sessionMightNeedTransition(
+	snapshot *SessionSnapshot,
+	currentHeight int64,
+	params *sharedtypes.Params,
+) bool {
+	// Terminal states never need transitions (they should be cleaned up)
+	if snapshot.State.IsTerminal() {
+		return true // Return true to trigger cleanup in the main loop
+	}
+
+	switch snapshot.State {
+	case SessionStateActive:
+		// Active sessions only need checking when claim window opens
+		claimWindowOpen := sharedtypes.GetClaimWindowOpenHeight(params, snapshot.SessionEndHeight)
+		return currentHeight >= claimWindowOpen
+
+	case SessionStateClaiming:
+		// Claiming sessions need checking for timeout detection
+		// (the callback handles success, but we need to detect if it didn't run)
+		return true
+
+	case SessionStateClaimed:
+		// Claimed sessions only need checking when proof window opens
+		proofWindowOpen := sharedtypes.GetProofWindowOpenHeight(params, snapshot.SessionEndHeight)
+		return currentHeight >= proofWindowOpen
+
+	case SessionStateProving:
+		// Proving sessions need checking for timeout detection
+		// (the callback handles success, but we need to detect if it didn't run)
+		return true
+
+	default:
+		// Unknown state - check it to be safe
+		return true
+	}
+}
+
 // checkSessionTransitions checks all active sessions for required state transitions.
 func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, currentHeight int64) {
-	m.activeSessionsMu.RLock()
-	sessionIDs := make([]string, 0, len(m.activeSessions))
-	for sessionID := range m.activeSessions {
-		sessionIDs = append(sessionIDs, sessionID)
-	}
-	m.activeSessionsMu.RUnlock()
-
 	params := m.getSharedParams()
 	if params == nil {
 		m.logger.Warn().Msg("shared params not available, skipping transition check")
 		return
+	}
+
+	// OPTIMIZATION: Pre-filter sessions using in-memory state to avoid unnecessary Redis calls.
+	// Only collect sessions that MIGHT need a transition at this block height.
+	// This reduces Redis calls from O(all sessions) to O(sessions in relevant windows).
+	totalSessions := 0
+	candidateSessionIDs := make([]string, 0)
+	m.activeSessions.Range(func(sessionID string, snapshot *SessionSnapshot) bool {
+		totalSessions++
+		if m.sessionMightNeedTransition(snapshot, currentHeight, params) {
+			candidateSessionIDs = append(candidateSessionIDs, sessionID)
+		}
+		return true // continue iteration
+	})
+
+	// Log filtering stats for observability
+	filteredOut := totalSessions - len(candidateSessionIDs)
+	if totalSessions > 0 {
+		m.logger.Debug().
+			Int64("current_height", currentHeight).
+			Int("total_in_memory", totalSessions).
+			Int("candidates_to_check", len(candidateSessionIDs)).
+			Int("filtered_out", filteredOut).
+			Msg("session_lifecycle_filter: window-based filtering applied")
 	}
 
 	// Group sessions by transition type (claiming, proving, terminal states)
@@ -521,7 +587,7 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 	// Terminal sessions stored as alternating (state, session) pairs for individual handling
 	var terminalSessions []interface{}
 
-	for _, sessionID := range sessionIDs {
+	for _, sessionID := range candidateSessionIDs {
 		// CRITICAL: Reload session from Redis to get latest state (not stale in-memory copy)
 		// Callbacks may have updated state to terminal (e.g., proof_tx_error) which must not be overwritten
 		session, err := m.sessionStore.Get(ctx, sessionID)
@@ -538,6 +604,21 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 		// Terminal states (proved, probabilistic_proved, claim_tx_error, proof_tx_error, etc.)
 		// represent final outcomes and must not be overwritten by window timeout logic
 		if session.State.IsTerminal() {
+			// BUG FIX: Remove terminal sessions from in-memory tracking.
+			// This can happen when:
+			// 1. Callback updated Redis to terminal state (e.g., probabilistic_proved, proof_window_closed)
+			// 2. But callback returned an error before lifecycle manager could delete from activeSessions
+			// 3. Session remains in activeSessions but is terminal in Redis
+			// Without this cleanup, terminal sessions accumulate in activeSessions forever,
+			// causing worker pool exhaustion as each block processes stale sessions.
+			m.activeSessions.Delete(session.SessionID)
+
+			m.logger.Debug().
+				Str(logging.FieldSessionID, session.SessionID).
+				Str(logging.FieldSessionState, string(session.State)).
+				Str(logging.FieldServiceID, session.ServiceID).
+				Msg("cleaned up stale terminal session from in-memory tracking")
+
 			continue
 		}
 
@@ -806,11 +887,11 @@ func (m *SessionLifecycleManager) executeBatchedClaimTransition(ctx context.Cont
 		}
 		if freshSnapshot != nil {
 			// Update in-memory state with fresh Redis data
-			m.activeSessionsMu.Lock()
+			// Note: Session is a pointer in the map, and each session is processed
+			// by one goroutine at a time, so direct field updates are safe
 			session.RelayCount = freshSnapshot.RelayCount
 			session.TotalComputeUnits = freshSnapshot.TotalComputeUnits
 			session.LastUpdatedAt = freshSnapshot.LastUpdatedAt
-			m.activeSessionsMu.Unlock()
 
 			m.logger.Debug().
 				Str(logging.FieldSessionID, session.SessionID).
@@ -842,11 +923,9 @@ func (m *SessionLifecycleManager) executeBatchedClaimTransition(ctx context.Cont
 	for i, session := range sessions {
 		session.ClaimedRootHash = rootHashes[i]
 
-		// Update session state
-		m.activeSessionsMu.Lock()
+		// Update session state (pointer update, safe without mutex)
 		session.State = SessionStateClaimed
 		session.LastUpdatedAt = time.Now()
-		m.activeSessionsMu.Unlock()
 
 		// Persist the state change
 		if err := m.sessionStore.UpdateState(ctx, session.SessionID, SessionStateClaimed); err != nil {
@@ -887,11 +966,9 @@ func (m *SessionLifecycleManager) executeBatchedProofTransition(ctx context.Cont
 
 	// Update all sessions and transition to proved
 	for _, session := range sessions {
-		// Update session state
-		m.activeSessionsMu.Lock()
+		// Update session state (pointer update, safe without mutex)
 		session.State = SessionStateProved
 		session.LastUpdatedAt = time.Now()
-		m.activeSessionsMu.Unlock()
 
 		// Persist the state change
 		if err := m.sessionStore.UpdateState(ctx, session.SessionID, SessionStateProved); err != nil {
@@ -923,10 +1000,8 @@ func (m *SessionLifecycleManager) executeBatchedProofTransition(ctx context.Cont
 				Msg("proved callback failed in batched transition")
 		}
 
-		// Remove from active tracking
-		m.activeSessionsMu.Lock()
-		delete(m.activeSessions, session.SessionID)
-		m.activeSessionsMu.Unlock()
+		// Remove from active tracking (lock-free delete)
+		m.activeSessions.Delete(session.SessionID)
 
 		m.logger.Info().
 			Str(logging.FieldSessionID, session.SessionID).
@@ -990,11 +1065,9 @@ func (m *SessionLifecycleManager) executeTransition(
 		}
 	}
 
-	// Update session state
-	m.activeSessionsMu.Lock()
+	// Update session state (pointer update, safe without mutex)
 	session.State = newState
 	session.LastUpdatedAt = time.Now()
-	m.activeSessionsMu.Unlock()
 
 	// Persist the state change
 	err = m.sessionStore.UpdateState(ctx, session.SessionID, newState)
@@ -1012,11 +1085,9 @@ func (m *SessionLifecycleManager) executeTransition(
 		string(newState),
 	).Inc()
 
-	// Remove terminal sessions from active tracking
+	// Remove terminal sessions from active tracking (lock-free delete)
 	if newState.IsTerminal() {
-		m.activeSessionsMu.Lock()
-		delete(m.activeSessions, session.SessionID)
-		m.activeSessionsMu.Unlock()
+		m.activeSessions.Delete(session.SessionID)
 
 		sessionLogger.Info().
 			Str(logging.FieldNewState, string(newState)).
@@ -1027,16 +1098,12 @@ func (m *SessionLifecycleManager) executeTransition(
 
 // HasPendingSessions returns true if there are sessions not yet settled.
 func (m *SessionLifecycleManager) HasPendingSessions() bool {
-	m.activeSessionsMu.RLock()
-	defer m.activeSessionsMu.RUnlock()
-	return len(m.activeSessions) > 0
+	return m.activeSessions.Size() > 0
 }
 
 // GetPendingSessionCount returns the count of sessions pending settlement.
 func (m *SessionLifecycleManager) GetPendingSessionCount() int {
-	m.activeSessionsMu.RLock()
-	defer m.activeSessionsMu.RUnlock()
-	return len(m.activeSessions)
+	return m.activeSessions.Size()
 }
 
 // WaitForSettlement waits for all pending sessions to settle.

@@ -286,7 +286,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by(supplier, service_id) (ha_miner_session_state_transitions_total{supplier=~\"$supplier\", service_id=~\"$service\", to_state=\"claimed\"})",
+          "expr": "sum (ha_miner_session_state_transitions_total{supplier=~\"$supplier\", service_id=~\"$service\", to_state=\"claimed\"})",
           "legendFormat": "Claimed",
           "range": true,
           "refId": "A"
@@ -297,7 +297,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by(supplier, service_id) (ha_miner_session_state_transitions_total{supplier=~\"$supplier\", service_id=~\"$service\", to_state=\"proved\"})",
+          "expr": "sum (ha_miner_session_state_transitions_total{supplier=~\"$supplier\", service_id=~\"$service\", to_state=\"proved\"})",
           "hide": false,
           "instant": false,
           "legendFormat": "Proved",

@@ -244,6 +244,20 @@ func (s *RedisSessionStore) Save(ctx context.Context, snapshot *SessionSnapshot)
 	}
 	s.mu.Unlock()
 
+	// Get existing session to check for state change (for index cleanup)
+	var oldState SessionState
+	existingSnapshot, err := s.Get(ctx, snapshot.SessionID)
+	if err != nil {
+		// Log but continue - this is not critical for the save operation
+		s.logger.Warn().
+			Err(err).
+			Str("session_id", snapshot.SessionID).
+			Msg("failed to get existing session for state index cleanup")
+	}
+	if existingSnapshot != nil {
+		oldState = existingSnapshot.State
+	}
+
 	snapshot.LastUpdatedAt = time.Now()
 	if snapshot.CreatedAt.IsZero() {
 		snapshot.CreatedAt = snapshot.LastUpdatedAt
@@ -266,13 +280,33 @@ func (s *RedisSessionStore) Save(ctx context.Context, snapshot *SessionSnapshot)
 	pipe.SAdd(ctx, s.supplierSessionsKey(), snapshot.SessionID)
 	pipe.Expire(ctx, s.supplierSessionsKey(), s.config.SessionTTL)
 
-	// Add to state index
+	// Add to new state index first (safe - ensures session is indexed)
 	pipe.SAdd(ctx, s.stateIndexKey(snapshot.State), snapshot.SessionID)
 	pipe.Expire(ctx, s.stateIndexKey(snapshot.State), s.config.SessionTTL)
 
 	_, err = pipe.Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to save session snapshot: %w", err)
+	}
+
+	// After successful save, clean up old state index if state changed
+	// This is done outside the transaction - if it fails, session is in both indexes
+	// temporarily (safe), rather than losing the session entirely
+	if oldState != "" && oldState != snapshot.State {
+		if err := s.redisClient.SRem(ctx, s.stateIndexKey(oldState), snapshot.SessionID).Err(); err != nil {
+			s.logger.Warn().
+				Err(err).
+				Str("session_id", snapshot.SessionID).
+				Str("old_state", string(oldState)).
+				Str("new_state", string(snapshot.State)).
+				Msg("failed to remove session from old state index (non-critical)")
+		} else {
+			s.logger.Debug().
+				Str("session_id", snapshot.SessionID).
+				Str("old_state", string(oldState)).
+				Str("new_state", string(snapshot.State)).
+				Msg("cleaned up old state index after state transition")
+		}
 	}
 
 	sessionSnapshotsSaved.WithLabelValues(s.config.SupplierAddress).Inc()

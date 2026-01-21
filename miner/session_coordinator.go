@@ -13,6 +13,11 @@ import (
 // This allows external components (like SessionLifecycleManager) to be notified.
 type SessionCreatedCallback func(ctx context.Context, snapshot *SessionSnapshot) error
 
+// SessionTerminalCallback is called when a session transitions to a terminal state.
+// This allows external components (like SessionLifecycleManager) to update in-memory state
+// atomically with Redis updates.
+type SessionTerminalCallback func(sessionID string, state SessionState)
+
 // SMSTRecoveryConfig contains configuration for session recovery.
 type SMSTRecoveryConfig struct {
 	// SupplierAddress is the supplier this recovery service is for.
@@ -31,6 +36,10 @@ type SessionCoordinator struct {
 
 	// onSessionCreated is called when a new session is created
 	onSessionCreated SessionCreatedCallback
+
+	// onSessionTerminal is called when a session transitions to a terminal state.
+	// This allows in-memory state to be updated atomically with Redis.
+	onSessionTerminal SessionTerminalCallback
 
 	mu     sync.Mutex
 	closed bool
@@ -54,6 +63,14 @@ func (c *SessionCoordinator) SetOnSessionCreatedCallback(callback SessionCreated
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.onSessionCreated = callback
+}
+
+// SetOnSessionTerminalCallback sets the callback to be invoked when a session transitions to terminal state.
+// This allows SessionLifecycleManager to update in-memory state atomically with Redis updates.
+func (c *SessionCoordinator) SetOnSessionTerminalCallback(callback SessionTerminalCallback) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onSessionTerminal = callback
 }
 
 // OnRelayProcessed should be called when a relay is successfully processed and added to SMST.
@@ -265,6 +282,7 @@ func (c *SessionCoordinator) OnSessionProved(
 		c.mu.Unlock()
 		return fmt.Errorf("session coordinator is closed")
 	}
+	terminalCallback := c.onSessionTerminal
 	c.mu.Unlock()
 
 	// Update state to proved
@@ -273,6 +291,15 @@ func (c *SessionCoordinator) OnSessionProved(
 			Err(err).
 			Str(logging.FieldSessionID, sessionID).
 			Msg("failed to update session state to proved")
+	}
+
+	// Notify in-memory state update (if callback registered)
+	if terminalCallback != nil {
+		c.logger.Debug().
+			Str(logging.FieldSessionID, sessionID).
+			Str(logging.FieldSessionState, string(SessionStateProved)).
+			Msg("session_coordinator_terminal: invoking terminal callback")
+		terminalCallback(sessionID, SessionStateProved)
 	}
 
 	c.logger.Debug().
@@ -290,12 +317,22 @@ func (c *SessionCoordinator) OnClaimWindowClosed(ctx context.Context, sessionID 
 		c.mu.Unlock()
 		return fmt.Errorf("session coordinator is closed")
 	}
+	terminalCallback := c.onSessionTerminal
 	c.mu.Unlock()
 
 	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateClaimWindowClosed); err != nil {
 		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to update session state to claim_window_closed")
 		return err
+	}
+
+	// Notify in-memory state update (if callback registered)
+	if terminalCallback != nil {
+		c.logger.Debug().
+			Str(logging.FieldSessionID, sessionID).
+			Str(logging.FieldSessionState, string(SessionStateClaimWindowClosed)).
+			Msg("session_coordinator_terminal: invoking terminal callback")
+		terminalCallback(sessionID, SessionStateClaimWindowClosed)
 	}
 
 	c.logger.Debug().Str(logging.FieldSessionID, sessionID).Msg("claim window closed")
@@ -310,12 +347,22 @@ func (c *SessionCoordinator) OnClaimTxError(ctx context.Context, sessionID strin
 		c.mu.Unlock()
 		return fmt.Errorf("session coordinator is closed")
 	}
+	terminalCallback := c.onSessionTerminal
 	c.mu.Unlock()
 
 	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateClaimTxError); err != nil {
 		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to update session state to claim_tx_error")
 		return err
+	}
+
+	// Notify in-memory state update (if callback registered)
+	if terminalCallback != nil {
+		c.logger.Debug().
+			Str(logging.FieldSessionID, sessionID).
+			Str(logging.FieldSessionState, string(SessionStateClaimTxError)).
+			Msg("session_coordinator_terminal: invoking terminal callback")
+		terminalCallback(sessionID, SessionStateClaimTxError)
 	}
 
 	c.logger.Debug().Str(logging.FieldSessionID, sessionID).Msg("claim tx error")
@@ -330,12 +377,22 @@ func (c *SessionCoordinator) OnProofWindowClosed(ctx context.Context, sessionID 
 		c.mu.Unlock()
 		return fmt.Errorf("session coordinator is closed")
 	}
+	terminalCallback := c.onSessionTerminal
 	c.mu.Unlock()
 
 	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateProofWindowClosed); err != nil {
 		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to update session state to proof_window_closed")
 		return err
+	}
+
+	// Notify in-memory state update (if callback registered)
+	if terminalCallback != nil {
+		c.logger.Debug().
+			Str(logging.FieldSessionID, sessionID).
+			Str(logging.FieldSessionState, string(SessionStateProofWindowClosed)).
+			Msg("session_coordinator_terminal: invoking terminal callback")
+		terminalCallback(sessionID, SessionStateProofWindowClosed)
 	}
 
 	c.logger.Debug().Str(logging.FieldSessionID, sessionID).Msg("proof window closed")
@@ -350,12 +407,22 @@ func (c *SessionCoordinator) OnProofTxError(ctx context.Context, sessionID strin
 		c.mu.Unlock()
 		return fmt.Errorf("session coordinator is closed")
 	}
+	terminalCallback := c.onSessionTerminal
 	c.mu.Unlock()
 
 	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateProofTxError); err != nil {
 		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to update session state to proof_tx_error")
 		return err
+	}
+
+	// Notify in-memory state update (if callback registered)
+	if terminalCallback != nil {
+		c.logger.Debug().
+			Str(logging.FieldSessionID, sessionID).
+			Str(logging.FieldSessionState, string(SessionStateProofTxError)).
+			Msg("session_coordinator_terminal: invoking terminal callback")
+		terminalCallback(sessionID, SessionStateProofTxError)
 	}
 
 	c.logger.Debug().Str(logging.FieldSessionID, sessionID).Msg("proof tx error")
@@ -370,12 +437,22 @@ func (c *SessionCoordinator) OnProbabilisticProved(ctx context.Context, sessionI
 		c.mu.Unlock()
 		return fmt.Errorf("session coordinator is closed")
 	}
+	terminalCallback := c.onSessionTerminal
 	c.mu.Unlock()
 
 	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateProbabilisticProved); err != nil {
 		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to update session state to probabilistic_proved")
 		return err
+	}
+
+	// Notify in-memory state update (if callback registered)
+	if terminalCallback != nil {
+		c.logger.Debug().
+			Str(logging.FieldSessionID, sessionID).
+			Str(logging.FieldSessionState, string(SessionStateProbabilisticProved)).
+			Msg("session_coordinator_terminal: invoking terminal callback")
+		terminalCallback(sessionID, SessionStateProbabilisticProved)
 	}
 
 	c.logger.Debug().Str(logging.FieldSessionID, sessionID).Msg("probabilistic proved (no proof required)")
