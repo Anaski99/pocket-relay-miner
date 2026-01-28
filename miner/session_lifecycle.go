@@ -389,12 +389,15 @@ func (m *SessionLifecycleManager) UpdateSessionRelayCount(ctx context.Context, s
 	session.TotalComputeUnits += computeUnits
 	session.LastUpdatedAt = time.Now()
 
-	// Persist update asynchronously
-	go func() {
+	// Persist update asynchronously using bounded worker pool.
+	// This prevents unbounded goroutine creation at high RPS (300+ RPS would spawn
+	// 300+ goroutines/sec with raw go func(), causing memory leaks).
+	// The pool queues tasks if workers are busy, providing backpressure.
+	m.transitionSubpool.Submit(func() {
 		if err := m.sessionStore.IncrementRelayCount(ctx, sessionID, computeUnits); err != nil {
 			m.logger.Warn().Err(err).Str("session_id", sessionID).Msg("failed to persist relay count")
 		}
-	}()
+	})
 
 	return nil
 }

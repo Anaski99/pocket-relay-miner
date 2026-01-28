@@ -45,6 +45,10 @@ type SupplierParamCache interface {
 	// Uses L1 -> L2 -> L3 fallback strategy.
 	GetSupplierParams(ctx context.Context) (*suppliertypes.Params, error)
 
+	// Refresh updates the cache from the chain (called by leader only).
+	// Forces a fresh query and publishes invalidation to other instances.
+	Refresh(ctx context.Context) error
+
 	// InvalidateSupplierParams invalidates the cached supplier params.
 	// Call this when you know params have changed (e.g., governance proposal passed).
 	InvalidateSupplierParams(ctx context.Context) error

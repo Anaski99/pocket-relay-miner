@@ -1701,28 +1701,49 @@ func (lc *LifecycleCallback) OnProbabilisticProved(ctx context.Context, snapshot
 }
 
 // OnClaimWindowClosed is called when a session fails due to claim window timeout.
-func (lc *LifecycleCallback) OnClaimWindowClosed(_ context.Context, snapshot *SessionSnapshot) error {
+
+func (lc *LifecycleCallback) OnClaimWindowClosed(ctx context.Context, snapshot *SessionSnapshot) error {
+	// Clean up SMST tree to prevent memory leak
+	if err := lc.smstManager.DeleteTree(ctx, snapshot.SessionID); err != nil {
+		lc.logger.Warn().Err(err).Str("session_id", snapshot.SessionID).Msg("failed to delete SMST tree on claim window closed")
+	}
+
 	// Metrics already recorded at failure point, just cleanup
 	lc.removeSessionLock(snapshot.SessionID)
 	return nil
 }
 
 // OnClaimTxError is called when a session fails due to claim transaction error.
-func (lc *LifecycleCallback) OnClaimTxError(_ context.Context, snapshot *SessionSnapshot) error {
+func (lc *LifecycleCallback) OnClaimTxError(ctx context.Context, snapshot *SessionSnapshot) error {
+	// Clean up SMST tree to prevent memory leak
+	if err := lc.smstManager.DeleteTree(ctx, snapshot.SessionID); err != nil {
+		lc.logger.Warn().Err(err).Str("session_id", snapshot.SessionID).Msg("failed to delete SMST tree on claim tx error")
+	}
+
 	// Metrics already recorded at failure point, just cleanup
 	lc.removeSessionLock(snapshot.SessionID)
 	return nil
 }
 
 // OnProofWindowClosed is called when a session fails due to proof window timeout.
-func (lc *LifecycleCallback) OnProofWindowClosed(_ context.Context, snapshot *SessionSnapshot) error {
+func (lc *LifecycleCallback) OnProofWindowClosed(ctx context.Context, snapshot *SessionSnapshot) error {
+	// Clean up SMST tree to prevent memory leak
+	if err := lc.smstManager.DeleteTree(ctx, snapshot.SessionID); err != nil {
+		lc.logger.Warn().Err(err).Str("session_id", snapshot.SessionID).Msg("failed to delete SMST tree on proof window closed")
+	}
+
 	// Metrics already recorded at failure point, just cleanup
 	lc.removeSessionLock(snapshot.SessionID)
 	return nil
 }
 
 // OnProofTxError is called when a session fails due to proof transaction error.
-func (lc *LifecycleCallback) OnProofTxError(_ context.Context, snapshot *SessionSnapshot) error {
+func (lc *LifecycleCallback) OnProofTxError(ctx context.Context, snapshot *SessionSnapshot) error {
+	// Clean up SMST tree to prevent memory leak
+	if err := lc.smstManager.DeleteTree(ctx, snapshot.SessionID); err != nil {
+		lc.logger.Warn().Err(err).Str("session_id", snapshot.SessionID).Msg("failed to delete SMST tree on proof tx error")
+	}
+
 	// Metrics already recorded at failure point, just cleanup
 	lc.removeSessionLock(snapshot.SessionID)
 	return nil

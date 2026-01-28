@@ -360,6 +360,7 @@ func (o *CacheOrchestrator) refreshAllCaches(ctx context.Context) error {
 		{"shared_params", o.refreshSharedParams},
 		{"session_params", o.refreshSessionParams},
 		{"proof_params", o.refreshProofParams},
+		{"supplier_params", o.refreshSupplierParams},
 		{"applications", o.refreshApplications},
 		{"services", o.refreshServices},
 		{"suppliers", o.refreshSuppliers},
@@ -413,6 +414,11 @@ func (o *CacheOrchestrator) refreshSessionParams(ctx context.Context) error {
 // refreshProofParams refreshes the proof params cache.
 func (o *CacheOrchestrator) refreshProofParams(ctx context.Context) error {
 	return o.proofParamsCache.Refresh(ctx)
+}
+
+// refreshSupplierParams refreshes the supplier module params cache.
+func (o *CacheOrchestrator) refreshSupplierParams(ctx context.Context) error {
+	return o.supplierParamsCache.Refresh(ctx)
 }
 
 // refreshApplications refreshes all known applications.

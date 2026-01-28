@@ -239,6 +239,7 @@ func (c *SupplierCache) GetSupplierState(ctx context.Context, operatorAddress st
 
 // SetSupplierState stores a supplier's state in both L1 and L2 caches.
 // The miner typically calls this to update supplier state.
+// Publishes invalidation event so other instances refresh their L1 cache.
 func (c *SupplierCache) SetSupplierState(ctx context.Context, state *SupplierState) error {
 	if state.OperatorAddress == "" {
 		return fmt.Errorf("operator_address is required")
@@ -261,6 +262,18 @@ func (c *SupplierCache) SetSupplierState(ctx context.Context, state *SupplierSta
 	// No TTL - explicit state management only
 	if err := c.redis.Set(ctx, key, data, 0).Err(); err != nil {
 		return fmt.Errorf("failed to set supplier state: %w", err)
+	}
+
+	// Publish invalidation event so other instances clear their L1 cache
+	// and reload fresh data from L2 on next access.
+	// This fixes the bug where relayers show "supplier not staked for service"
+	// after services are updated but L1 cache still has stale data.
+	payload := fmt.Sprintf(`{"operator_address": "%s"}`, state.OperatorAddress)
+	if err := PublishInvalidation(ctx, c.redis, c.logger, supplierCacheType, payload); err != nil {
+		c.logger.Warn().
+			Err(err).
+			Str(logging.FieldSupplierOperator, state.OperatorAddress).
+			Msg("failed to publish supplier cache invalidation (other instances may have stale data)")
 	}
 
 	c.logger.Debug().

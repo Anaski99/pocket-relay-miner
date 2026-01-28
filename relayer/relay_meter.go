@@ -355,9 +355,17 @@ func (m *RelayMeter) GetSessionMeterState(ctx context.Context, sessionID string)
 // ClearSessionMeter clears all metering data for a session.
 // Called by miners when claims are processed to free Redis space.
 func (m *RelayMeter) ClearSessionMeter(ctx context.Context, sessionID string) error {
-	// Get meta before deleting (need supplier/service_id for metric labels)
-	meta, _ := m.getSessionMeta(ctx, sessionID)
+	// Check if we have this session in LOCAL cache (L1).
+	// Only decrement metric if WE created this session meter (incremented the metric).
+	// Multiple relayers share Redis (L2), but each only tracks sessions it handled.
+	// Without this check, all relayers would decrement on cleanup signal,
+	// causing negative metric values.
+	m.localCacheMu.Lock()
+	localMeta, hadLocally := m.localCache[sessionID]
+	delete(m.localCache, sessionID)
+	m.localCacheMu.Unlock()
 
+	// Delete from Redis (shared L2 cache)
 	keys := []string{
 		m.metaKey(sessionID),
 		m.consumedKey(sessionID),
@@ -367,18 +375,14 @@ func (m *RelayMeter) ClearSessionMeter(ctx context.Context, sessionID string) er
 		return fmt.Errorf("failed to clear session meter: %w", err)
 	}
 
-	// Clear local cache
-	m.localCacheMu.Lock()
-	delete(m.localCache, sessionID)
-	m.localCacheMu.Unlock()
-
-	// Decrement metric with labels (if we have meta)
-	if meta != nil {
-		relayMeterSessionsActive.WithLabelValues(meta.SupplierAddress, meta.ServiceID).Dec()
+	// Only decrement metric if we had this session locally (meaning we incremented it)
+	if hadLocally && localMeta != nil {
+		relayMeterSessionsActive.WithLabelValues(localMeta.SupplierAddress, localMeta.ServiceID).Dec()
 	}
 
 	m.logger.Debug().
 		Str(logging.FieldSessionID, sessionID).
+		Bool("had_locally", hadLocally).
 		Msg("cleared session meter")
 
 	return nil

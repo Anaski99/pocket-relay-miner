@@ -241,6 +241,54 @@ func (c *RedisSupplierParamCache) queryAndCacheParams(ctx context.Context, key s
 	return params, nil
 }
 
+// Refresh updates the cache from the chain (called by leader only).
+// Forces a fresh query and publishes invalidation to other instances.
+func (c *RedisSupplierParamCache) Refresh(ctx context.Context) error {
+	c.mu.RLock()
+	if c.closed {
+		c.mu.RUnlock()
+		return fmt.Errorf("cache is closed")
+	}
+	c.mu.RUnlock()
+
+	// Query chain directly (bypass cache)
+	chainQueries.WithLabelValues("supplier_params").Inc()
+	chainStart := time.Now()
+
+	params, err := c.supplierClient.GetParams(ctx)
+	chainQueryLatency.WithLabelValues("supplier_params").Observe(time.Since(chainStart).Seconds())
+
+	if err != nil {
+		chainQueryErrors.WithLabelValues("supplier_params").Inc()
+		return fmt.Errorf("failed to query chain: %w", err)
+	}
+
+	// Update L1 cache
+	c.localCacheMu.Lock()
+	c.localCache = params
+	c.localCacheSet = true
+	c.localCacheMu.Unlock()
+
+	// Update L2 cache (Redis)
+	key := c.keys.SupplierParams()
+	data, marshalErr := json.Marshal(params)
+	if marshalErr == nil {
+		ttl := c.config.BlocksToTTL(c.config.TTLBlocks)
+		if cacheErr := c.redisClient.Set(ctx, key, data, ttl).Err(); cacheErr != nil {
+			c.logger.Warn().Err(cacheErr).Msg("failed to cache supplier params in Redis")
+		}
+	}
+
+	// Publish invalidation to other instances so they clear L1 and reload from L2
+	channel := c.config.PubSubPrefix + ":invalidate:supplier_params"
+	if err := c.redisClient.Publish(ctx, channel, "refresh").Err(); err != nil {
+		c.logger.Warn().Err(err).Msg("failed to publish supplier params refresh notification")
+	}
+
+	c.logger.Debug().Msg("supplier params refreshed from chain")
+	return nil
+}
+
 // InvalidateSupplierParams invalidates the cached supplier params.
 func (c *RedisSupplierParamCache) InvalidateSupplierParams(ctx context.Context) error {
 	c.mu.RLock()
