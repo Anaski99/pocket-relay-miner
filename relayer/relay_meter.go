@@ -212,6 +212,11 @@ func (m *RelayMeter) Start(ctx context.Context) error {
 	m.wg.Add(1)
 	go m.cleanupSubscriber(m.ctx)
 
+	// Start active sessions metric ticker
+	// Counts sessions directly from Redis to avoid distributed Inc/Dec coordination issues
+	m.wg.Add(1)
+	go m.activeSessionsMetricTicker(m.ctx)
+
 	m.logger.Info().
 		Str("fail_behavior", string(m.config.FailBehavior)).
 		Dur("cache_ttl", m.config.CacheTTL).
@@ -355,13 +360,8 @@ func (m *RelayMeter) GetSessionMeterState(ctx context.Context, sessionID string)
 // ClearSessionMeter clears all metering data for a session.
 // Called by miners when claims are processed to free Redis space.
 func (m *RelayMeter) ClearSessionMeter(ctx context.Context, sessionID string) error {
-	// Check if we have this session in LOCAL cache (L1).
-	// Only decrement metric if WE created this session meter (incremented the metric).
-	// Multiple relayers share Redis (L2), but each only tracks sessions it handled.
-	// Without this check, all relayers would decrement on cleanup signal,
-	// causing negative metric values.
+	// Clear from local cache (L1)
 	m.localCacheMu.Lock()
-	localMeta, hadLocally := m.localCache[sessionID]
 	delete(m.localCache, sessionID)
 	m.localCacheMu.Unlock()
 
@@ -375,14 +375,8 @@ func (m *RelayMeter) ClearSessionMeter(ctx context.Context, sessionID string) er
 		return fmt.Errorf("failed to clear session meter: %w", err)
 	}
 
-	// Only decrement metric if we had this session locally (meaning we incremented it)
-	if hadLocally && localMeta != nil {
-		relayMeterSessionsActive.WithLabelValues(localMeta.SupplierAddress, localMeta.ServiceID).Dec()
-	}
-
 	m.logger.Debug().
 		Str(logging.FieldSessionID, sessionID).
-		Bool("had_locally", hadLocally).
 		Msg("cleared session meter")
 
 	return nil
@@ -465,9 +459,6 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 	m.localCacheMu.Lock()
 	m.localCache[sessionID] = meta
 	m.localCacheMu.Unlock()
-
-	// Increment active sessions metric
-	relayMeterSessionsActive.WithLabelValues(meta.SupplierAddress, meta.ServiceID).Inc()
 
 	return meta, maxStakeUpokt, nil
 }
@@ -876,6 +867,95 @@ func (m *RelayMeter) cleanupSubscriber(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// activeSessionsMetricTicker periodically counts active sessions in Redis and updates the gauge.
+// This approach avoids distributed Inc/Dec coordination issues across multiple relayer replicas.
+func (m *RelayMeter) activeSessionsMetricTicker(ctx context.Context) {
+	defer m.wg.Done()
+
+	// Use 10 second interval - sessions live for minutes, so this is sufficiently accurate
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	// Get the key pattern for session meter meta keys
+	pattern := m.redisClient.KB().MeterMetaPattern()
+
+	for {
+		select {
+		case <-ctx.Done():
+			m.logger.Debug().Msg("active sessions metric ticker stopped")
+			return
+		case <-ticker.C:
+			// Count sessions using SCAN to avoid blocking Redis
+			count, bySupplierService, err := m.countActiveSessions(ctx, pattern)
+			if err != nil {
+				m.logger.Warn().Err(err).Msg("failed to count active sessions for metrics")
+				continue
+			}
+
+			// Update per-supplier/service gauges
+			for key, cnt := range bySupplierService {
+				relayMeterSessionsActive.WithLabelValues(key.supplier, key.serviceID).Set(float64(cnt))
+			}
+
+			m.logger.Debug().
+				Int64("total_active_sessions", count).
+				Int("unique_supplier_service_pairs", len(bySupplierService)).
+				Msg("updated active sessions metric")
+		}
+	}
+}
+
+// supplierServiceKey is used as a map key for counting sessions per supplier/service.
+type supplierServiceKey struct {
+	supplier  string
+	serviceID string
+}
+
+// countActiveSessions counts active session meters in Redis using SCAN.
+// Returns total count and counts grouped by supplier/service.
+func (m *RelayMeter) countActiveSessions(ctx context.Context, pattern string) (int64, map[supplierServiceKey]int64, error) {
+	var cursor uint64
+	var totalCount int64
+	bySupplierService := make(map[supplierServiceKey]int64)
+
+	for {
+		// SCAN with count hint of 100 to balance between network calls and Redis blocking
+		keys, nextCursor, err := m.redisClient.Scan(ctx, cursor, pattern, 100).Result()
+		if err != nil {
+			return 0, nil, fmt.Errorf("failed to scan meter keys: %w", err)
+		}
+
+		// For each key, fetch metadata to get supplier/service info
+		for _, key := range keys {
+			totalCount++
+
+			// Fetch the meta to get supplier/service (needed for per-label gauges)
+			data, err := m.redisClient.Get(ctx, key).Bytes()
+			if err != nil {
+				continue // Key may have expired between SCAN and GET
+			}
+
+			var meta SessionMeterMeta
+			if err := json.Unmarshal(data, &meta); err != nil {
+				continue
+			}
+
+			ssKey := supplierServiceKey{
+				supplier:  meta.SupplierAddress,
+				serviceID: meta.ServiceID,
+			}
+			bySupplierService[ssKey]++
+		}
+
+		cursor = nextCursor
+		if cursor == 0 {
+			break
+		}
+	}
+
+	return totalCount, bySupplierService, nil
 }
 
 // Close gracefully shuts down the relay meter.

@@ -265,6 +265,13 @@ func (kb *KeyBuilder) MeterCleanupChannel() string {
 	return fmt.Sprintf("%s:%s:cleanup", kb.ns.BasePrefix, kb.ns.MeterPrefix)
 }
 
+// MeterMetaPattern builds the pattern for scanning all session meter meta keys.
+// Format: {base}:{meter}:*:meta
+// Example: "ha:meter:*:meta"
+func (kb *KeyBuilder) MeterMetaPattern() string {
+	return fmt.Sprintf("%s:%s:*:meta", kb.ns.BasePrefix, kb.ns.MeterPrefix)
+}
+
 // SupplierUpdateChannel builds the pub/sub channel for supplier updates.
 // Format: {base}:{events}:supplier_update
 // Example: "ha:events:supplier_update"
