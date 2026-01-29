@@ -294,7 +294,6 @@ func (rv *relayValidator) getTargetSessionBlockHeight(
 	// NOTE: grace_period_extra_blocks was removed - it created inconsistency between
 	// getTargetSessionBlockHeight() and CheckRewardEligibility() causing relays to be
 	// accepted but marked as ineligible for rewards.
-	// 10 - 572340 - 572320
 	if !sharedtypes.IsGracePeriodElapsed(sharedParams, sessionEndHeight, currentHeight) {
 		// Within grace period, use session end height for lookup
 		return sessionEndHeight, nil

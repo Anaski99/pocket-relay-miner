@@ -239,7 +239,9 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 					Str(logging.FieldMessageID, message.ID).
 					Msg("failed to parse message")
 				// Acknowledge AND delete bad message to avoid redelivery and keep stream clean
-				_ = c.client.XAckDel(ctx, c.streamName, c.config.ConsumerGroup, "DELREF", message.ID)
+				if err := c.client.XAckDel(ctx, c.streamName, c.config.ConsumerGroup, "DELREF", message.ID).Err(); err != nil {
+					c.logger.Warn().Err(err).Str(logging.FieldMessageID, message.ID).Msg("failed to XAckDel bad message")
+				}
 				continue
 			}
 
@@ -362,21 +364,6 @@ func (c *StreamsConsumer) parseMessage(message redis.XMessage, streamName string
 	}, nil
 }
 
-// Ack acknowledges that a message has been successfully processed.
-// DEPRECATED: Use AckMessage instead which automatically extracts stream name from StreamMessage.
-func (c *StreamsConsumer) Ack(ctx context.Context, messageID string) error {
-	c.mu.RLock()
-	if c.closed {
-		c.mu.RUnlock()
-		return fmt.Errorf("consumer is closed")
-	}
-	c.mu.RUnlock()
-
-	// This method is deprecated because we don't know which stream the message belongs to.
-	// Callers should use AckMessage instead.
-	return fmt.Errorf("Ack(messageID) is deprecated in multi-stream mode, use AckMessage(msg) instead")
-}
-
 // AckMessage acknowledges a StreamMessage using its embedded stream name.
 // This is the preferred method for acknowledging messages in multi-stream consumption.
 func (c *StreamsConsumer) AckMessage(ctx context.Context, msg transport.StreamMessage) error {
@@ -401,24 +388,6 @@ func (c *StreamsConsumer) AckMessage(ctx context.Context, msg transport.StreamMe
 
 	ackedTotal.WithLabelValues(c.config.SupplierOperatorAddress).Inc()
 	return nil
-}
-
-// AckBatch acknowledges multiple messages in a single operation.
-// Messages can be from different streams - they will be grouped automatically.
-func (c *StreamsConsumer) AckBatch(ctx context.Context, messageIDs []string) error {
-	c.mu.RLock()
-	if c.closed {
-		c.mu.RUnlock()
-		return fmt.Errorf("consumer is closed")
-	}
-	c.mu.RUnlock()
-
-	if len(messageIDs) == 0 {
-		return nil
-	}
-
-	// This method is deprecated because we don't know which streams the messages belong to.
-	return fmt.Errorf("AckBatch(messageIDs) is deprecated in multi-stream mode, use AckMessageBatch(msgs) instead")
 }
 
 // AckMessageBatch acknowledges multiple StreamMessages, automatically grouping by stream.

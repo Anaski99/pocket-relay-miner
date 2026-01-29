@@ -51,6 +51,19 @@ const (
 	// Metric label constants
 	metricLabelUnknown = "unknown"
 
+	// HTTP Server configuration constants
+	// MaxConcurrentStreams is the maximum concurrent HTTP/2 streams per connection.
+	MaxConcurrentStreams = 250
+	// ReadTimeoutBuffer is added to the max service timeout for request parsing overhead.
+	ReadTimeoutBuffer = 5 * time.Second
+	// DefaultIdleTimeout is how long to keep idle keep-alive connections open.
+	DefaultIdleTimeout = 120 * time.Second
+	// GracefulShutdownTimeout is the timeout for graceful server shutdown.
+	GracefulShutdownTimeout = 30 * time.Second
+	// MaxStreamScanTokenSize is the maximum size of a single chunk when scanning
+	// streaming responses (256KB to handle large LLM response chunks).
+	MaxStreamScanTokenSize = 256 * 1024
+
 	// Rejection reasons (for relaysRejected metric)
 	rejectReasonReadBodyError               = "read_body_error"
 	rejectReasonBodyTooLarge                = "body_too_large"
@@ -81,6 +94,14 @@ const (
 	dropReasonMeterError       = "meter_error"
 	dropReasonStakeExhausted   = "stake_exhausted"
 )
+
+// gzipWriterPool is a pool of gzip.Writer instances to reduce allocations
+// in the hot path when compressing relay responses.
+var gzipWriterPool = sync.Pool{
+	New: func() interface{} {
+		return gzip.NewWriter(nil)
+	},
+}
 
 // publishTask holds the data needed for publishing a mined relay.
 type publishTask struct {
@@ -438,7 +459,7 @@ func (p *ProxyServer) Start(ctx context.Context) error {
 	// Configure HTTP/2 server for h2c (HTTP/2 without TLS)
 	// This is required for native gRPC clients connecting without TLS
 	h2s := &http2.Server{
-		MaxConcurrentStreams: 250, // Allow up to 250 concurrent streams per connection
+		MaxConcurrentStreams: MaxConcurrentStreams,
 	}
 
 	// Wrap the handler with h2c to support both HTTP/1.1 and HTTP/2 cleartext
@@ -459,12 +480,12 @@ func (p *ProxyServer) Start(ctx context.Context) error {
 	p.server = &http.Server{
 		Addr:    p.config.ListenAddr,
 		Handler: handler,
-		// ReadTimeout: max service timeout + 5s buffer for request parsing
-		ReadTimeout: maxServiceTimeout + 5*time.Second,
+		// ReadTimeout: max service timeout + buffer for request parsing
+		ReadTimeout: maxServiceTimeout + ReadTimeoutBuffer,
 		// WriteTimeout: 0 (disabled) - we use ResponseController for per-request deadlines
 		// This allows streaming services to have 600s while fast services have 30s
 		WriteTimeout: 0,
-		IdleTimeout:  120 * time.Second,
+		IdleTimeout:  DefaultIdleTimeout,
 	}
 
 	// Start server in goroutine
@@ -481,7 +502,7 @@ func (p *ProxyServer) Start(ctx context.Context) error {
 	// Wait for shutdown signal
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), GracefulShutdownTimeout)
 		defer cancel()
 		if err := p.server.Shutdown(shutdownCtx); err != nil {
 			p.logger.Error().Err(err).Msg("error during server shutdown")
@@ -1461,9 +1482,8 @@ func (p *ProxyServer) handleStreamingResponse(
 	scanner := bufio.NewScanner(resp.Body)
 
 	// Increase buffer size for large chunks (LLM responses can be large)
-	const maxScanTokenSize = 256 * 1024 // 256KB per chunk
-	buf := make([]byte, maxScanTokenSize)
-	scanner.Buffer(buf, maxScanTokenSize)
+	buf := make([]byte, MaxStreamScanTokenSize)
+	scanner.Buffer(buf, MaxStreamScanTokenSize)
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -1802,11 +1822,14 @@ func (p *ProxyServer) Close() error {
 
 // compressGzip compresses data using gzip compression.
 // Returns the compressed data or an error if compression fails.
+// Uses sync.Pool to reuse gzip.Writer instances and reduce allocations.
 func compressGzip(data []byte) ([]byte, error) {
 	var buf bytes.Buffer
-	writer := gzip.NewWriter(&buf)
+	writer := gzipWriterPool.Get().(*gzip.Writer)
+	writer.Reset(&buf)
+	defer gzipWriterPool.Put(writer)
+
 	if _, err := writer.Write(data); err != nil {
-		_ = writer.Close() // Close on error path, main error already captured
 		return nil, fmt.Errorf("failed to write gzip data: %w", err)
 	}
 	if err := writer.Close(); err != nil {

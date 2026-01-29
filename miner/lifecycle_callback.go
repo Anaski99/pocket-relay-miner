@@ -40,35 +40,35 @@ type TestConfig struct {
 }
 
 var (
-	testConfig     TestConfig
-	testConfigOnce sync.Once
+	cachedTestConfig     TestConfig
+	cachedTestConfigOnce sync.Once
 )
 
 // getTestConfig returns the test configuration, reading environment variables once.
 func getTestConfig() TestConfig {
-	testConfigOnce.Do(func() {
-		testConfig.ForceClaimTxError = os.Getenv("TEST_FORCE_CLAIM_TX_ERROR") == "true"
-		testConfig.ForceProofTxError = os.Getenv("TEST_FORCE_PROOF_TX_ERROR") == "true"
+	cachedTestConfigOnce.Do(func() {
+		cachedTestConfig.ForceClaimTxError = os.Getenv("TEST_FORCE_CLAIM_TX_ERROR") == "true"
+		cachedTestConfig.ForceProofTxError = os.Getenv("TEST_FORCE_PROOF_TX_ERROR") == "true"
 
 		if delayStr := os.Getenv("TEST_CLAIM_DELAY_SECONDS"); delayStr != "" {
 			if delay, err := strconv.Atoi(delayStr); err == nil && delay > 0 {
-				testConfig.ClaimDelaySeconds = delay
+				cachedTestConfig.ClaimDelaySeconds = delay
 			}
 		}
 
 		// Support both TEST_DELAY_PROOF_SECONDS and TEST_PROOF_DELAY_SECONDS for backward compatibility
 		if delayStr := os.Getenv("TEST_DELAY_PROOF_SECONDS"); delayStr != "" {
 			if delay, err := strconv.Atoi(delayStr); err == nil && delay > 0 {
-				testConfig.ProofDelaySeconds = delay
+				cachedTestConfig.ProofDelaySeconds = delay
 			}
 		}
 		if delayStr := os.Getenv("TEST_PROOF_DELAY_SECONDS"); delayStr != "" {
 			if delay, err := strconv.Atoi(delayStr); err == nil && delay > 0 {
-				testConfig.ProofDelaySeconds = delay
+				cachedTestConfig.ProofDelaySeconds = delay
 			}
 		}
 	})
-	return testConfig
+	return cachedTestConfig
 }
 
 // LifecycleCallbackConfig contains configuration for the lifecycle callback.

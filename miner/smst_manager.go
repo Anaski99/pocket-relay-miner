@@ -16,6 +16,16 @@ import (
 	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
 )
 
+const (
+	// FlushPollInterval is the time to wait for in-flight UpdateTree calls to complete
+	// during the sealing process.
+	FlushPollInterval = 10 * time.Millisecond
+
+	// RedisScanBatchSize is the number of keys to scan per Redis SCAN iteration
+	// when warming up SMST trees from Redis.
+	RedisScanBatchSize = 100
+)
+
 // RedisSMSTManagerConfig contains configuration for the SMST manager.
 type RedisSMSTManagerConfig struct {
 	// SupplierAddress is the supplier this manager is for.
@@ -199,7 +209,7 @@ func (m *RedisSMSTManager) FlushTree(ctx context.Context, sessionID string) (roo
 		// Any relay that was already inside UpdateTree (passed sealing check) will finish.
 		// Any new relay will be rejected by the sealing flag.
 		tree.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(FlushPollInterval)
 		tree.mu.Lock()
 
 		// Phase 4: VERIFY - re-read and ensure nothing changed during wait
@@ -418,7 +428,7 @@ func (m *RedisSMSTManager) WarmupFromRedis(ctx context.Context) (int, error) {
 	smstPrefix := m.redisClient.KB().SMSTNodesPrefix()
 
 	for {
-		keys, nextCursor, err := m.redisClient.Scan(ctx, cursor, m.redisClient.KB().SMSTNodesPattern(), 100).Result()
+		keys, nextCursor, err := m.redisClient.Scan(ctx, cursor, m.redisClient.KB().SMSTNodesPattern(), RedisScanBatchSize).Result()
 		if err != nil {
 			return loadedCount, fmt.Errorf("failed to scan Redis for SMST keys: %w", err)
 		}

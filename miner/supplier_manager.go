@@ -1008,17 +1008,27 @@ func (m *SupplierManager) removeSupplier(operatorAddr string) {
 
 	// Close lifecycle manager first to stop monitoring
 	if state.LifecycleManager != nil {
-		_ = state.LifecycleManager.Close()
+		if err := state.LifecycleManager.Close(); err != nil {
+			m.logger.Warn().Err(err).Str(logging.FieldSupplier, operatorAddr).Msg("error closing lifecycle manager")
+		}
 	}
 
 	// Close SMST manager
 	if state.SMSTManager != nil {
-		_ = state.SMSTManager.Close()
+		if err := state.SMSTManager.Close(); err != nil {
+			m.logger.Warn().Err(err).Str(logging.FieldSupplier, operatorAddr).Msg("error closing SMST manager")
+		}
 	}
 
-	_ = state.Consumer.Close()
-	_ = state.SessionCoordinator.Close()
-	_ = state.SessionStore.Close()
+	if err := state.Consumer.Close(); err != nil {
+		m.logger.Warn().Err(err).Str(logging.FieldSupplier, operatorAddr).Msg("error closing consumer")
+	}
+	if err := state.SessionCoordinator.Close(); err != nil {
+		m.logger.Warn().Err(err).Str(logging.FieldSupplier, operatorAddr).Msg("error closing session coordinator")
+	}
+	if err := state.SessionStore.Close(); err != nil {
+		m.logger.Warn().Err(err).Str(logging.FieldSupplier, operatorAddr).Msg("error closing session store")
+	}
 
 	delete(m.suppliers, operatorAddr)
 

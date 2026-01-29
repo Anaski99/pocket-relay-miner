@@ -22,6 +22,15 @@ import (
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
+const (
+	// DefaultRefreshTimeout is the maximum time to wait for all cache refresh operations.
+	DefaultRefreshTimeout = 30 * time.Second
+
+	// RedisOperationTimeout is the timeout for Redis update operations during
+	// supplier registration/unregistration.
+	RedisOperationTimeout = 5 * time.Second
+)
+
 // CacheOrchestrator coordinates all caches and manages parallel refresh on block updates.
 //
 // The orchestrator:
@@ -197,25 +206,39 @@ func (o *CacheOrchestrator) Close() error {
 
 	// Close all caches (with nil checks for partial initialization)
 	if o.sharedParamsCache != nil {
-		_ = o.sharedParamsCache.Close()
+		if err := o.sharedParamsCache.Close(); err != nil {
+			o.logger.Warn().Err(err).Msg("error closing shared params cache")
+		}
 	}
 	if o.sessionParamsCache != nil {
-		_ = o.sessionParamsCache.Close()
+		if err := o.sessionParamsCache.Close(); err != nil {
+			o.logger.Warn().Err(err).Msg("error closing session params cache")
+		}
 	}
 	if o.proofParamsCache != nil {
-		_ = o.proofParamsCache.Close()
+		if err := o.proofParamsCache.Close(); err != nil {
+			o.logger.Warn().Err(err).Msg("error closing proof params cache")
+		}
 	}
 	if o.applicationCache != nil {
-		_ = o.applicationCache.Close()
+		if err := o.applicationCache.Close(); err != nil {
+			o.logger.Warn().Err(err).Msg("error closing application cache")
+		}
 	}
 	if o.serviceCache != nil {
-		_ = o.serviceCache.Close()
+		if err := o.serviceCache.Close(); err != nil {
+			o.logger.Warn().Err(err).Msg("error closing service cache")
+		}
 	}
 	if o.supplierCache != nil {
-		_ = o.supplierCache.Close()
+		if err := o.supplierCache.Close(); err != nil {
+			o.logger.Warn().Err(err).Msg("error closing supplier cache")
+		}
 	}
 	if o.sessionCache != nil {
-		_ = o.sessionCache.Close()
+		if err := o.sessionCache.Close(); err != nil {
+			o.logger.Warn().Err(err).Msg("error closing session cache")
+		}
 	}
 
 	o.logger.Info().Msg("cache orchestrator stopped")
@@ -225,7 +248,7 @@ func (o *CacheOrchestrator) Close() error {
 
 // onBecameLeader is called when this instance becomes the global leader.
 // Starts block subscription and refresh worker (leader-only operations).
-func (o *CacheOrchestrator) onBecameLeader(ctx context.Context) {
+func (o *CacheOrchestrator) onBecameLeader(_ context.Context) {
 	o.logger.Info().Msg("became leader, starting block subscription and cache refresh")
 
 	// Create cancellable context for leader-only operations
@@ -257,7 +280,7 @@ func (o *CacheOrchestrator) onBecameLeader(ctx context.Context) {
 
 // onLostLeadership is called when this instance loses leadership.
 // Stops block subscription and refresh worker.
-func (o *CacheOrchestrator) onLostLeadership(ctx context.Context) {
+func (o *CacheOrchestrator) onLostLeadership(_ context.Context) {
 	o.logger.Warn().Msg("lost leadership, stopping block subscription and cache refresh")
 
 	// Cancel leader-only operations
@@ -349,7 +372,7 @@ func (o *CacheOrchestrator) refreshWorker(ctx context.Context) {
 
 // refreshAllCaches refreshes all caches in parallel using pond subpool.
 func (o *CacheOrchestrator) refreshAllCaches(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, DefaultRefreshTimeout)
 	defer cancel()
 
 	// Define refresh tasks
@@ -467,14 +490,13 @@ func (o *CacheOrchestrator) refreshApplications(ctx context.Context) error {
 						Msg("application not found on chain (likely unstaked)")
 					// TODO: Consider removing from knownApps after N consecutive NotFound
 					return nil // Don't fail the group for NotFound
-				} else {
-					// Unexpected error (network, timeout, etc.)
-					o.logger.Warn().
-						Err(err).
-						Str(logging.FieldAppAddress, addr).
-						Msg("failed to refresh application")
-					return err
 				}
+				// Unexpected error (network, timeout, etc.)
+				o.logger.Warn().
+					Err(err).
+					Str(logging.FieldAppAddress, addr).
+					Msg("failed to refresh application")
+				return err
 			}
 			return nil
 		})
@@ -540,14 +562,13 @@ func (o *CacheOrchestrator) refreshServices(ctx context.Context) error {
 						Msg("service not found on chain (likely removed)")
 					// TODO: Consider removing from knownServices after N consecutive NotFound
 					return nil // Don't fail the group for NotFound
-				} else {
-					// Unexpected error (network, timeout, etc.)
-					o.logger.Warn().
-						Err(err).
-						Str(logging.FieldServiceID, svcID).
-						Msg("failed to refresh service")
-					return err
 				}
+				// Unexpected error (network, timeout, etc.)
+				o.logger.Warn().
+					Err(err).
+					Str(logging.FieldServiceID, svcID).
+					Msg("failed to refresh service")
+				return err
 			}
 			return nil
 		})
@@ -831,7 +852,7 @@ func (o *CacheOrchestrator) RegisterSupplier(supplierAddress string) {
 		Msg("registered supplier from KeyManager")
 
 	// Update Redis set immediately
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), RedisOperationTimeout)
 	defer cancel()
 
 	// Collect all known suppliers
@@ -856,7 +877,7 @@ func (o *CacheOrchestrator) UnregisterSupplier(supplierAddress string) {
 		Msg("unregistered supplier from KeyManager")
 
 	// Update Redis set immediately
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), RedisOperationTimeout)
 	defer cancel()
 
 	// Collect all known suppliers

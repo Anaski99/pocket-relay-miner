@@ -33,10 +33,10 @@ type MinedRelayPublisher interface {
 // MinedRelayConsumer consumes mined relays from the transport layer.
 // The Miner service uses this interface to receive mined relays from Relayer instances.
 //
-// Implementations must provide exactly-once delivery semantics within the consumer group.
+// Messages are auto-acknowledged via XACKDEL (Redis 8.2+) on successful consumption.
 type MinedRelayConsumer interface {
 	// Consume returns a channel that yields mined relay messages.
-	// Messages are not acknowledged until Ack is called.
+	// Messages are auto-acknowledged when received from the channel.
 	//
 	// The channel is closed when:
 	// - The context is cancelled
@@ -45,19 +45,6 @@ type MinedRelayConsumer interface {
 	//
 	// Callers should handle channel closure gracefully.
 	Consume(ctx context.Context) <-chan StreamMessage
-
-	// Ack acknowledges that a message has been successfully processed.
-	// The message will not be redelivered to any consumer in the group.
-	//
-	// Call this AFTER the relay has been:
-	// 1. Deduplicated
-	// 2. Added to the session tree
-	// 3. Persisted to WAL (if applicable)
-	Ack(ctx context.Context, messageID string) error
-
-	// AckBatch acknowledges multiple messages in a single operation.
-	// More efficient than individual Ack calls.
-	AckBatch(ctx context.Context, messageIDs []string) error
 
 	// Pending returns the number of messages that have been delivered but not yet acknowledged.
 	// Useful for monitoring consumer health and backpressure.
@@ -111,18 +98,4 @@ type ConsumerConfig struct {
 // The sessionID is embedded in the message, not in the stream name.
 func SupplierStreamName(prefix, supplierOperatorAddress string) string {
 	return prefix + ":" + supplierOperatorAddress
-}
-
-// StreamName returns the full Redis stream name for a session.
-// Format: {prefix}:{supplierAddr}:{sessionID}
-// DEPRECATED: Use SupplierStreamName instead. Kept for backwards compatibility.
-func StreamName(prefix, supplierOperatorAddress, sessionID string) string {
-	return prefix + ":" + supplierOperatorAddress + ":" + sessionID
-}
-
-// StreamPattern returns a Redis key pattern for discovering all streams for a supplier.
-// Use with SCAN to find all session streams for a supplier.
-// DEPRECATED: No longer needed with single stream per supplier architecture.
-func StreamPattern(prefix, supplierOperatorAddress string) string {
-	return prefix + ":" + supplierOperatorAddress + ":*"
 }

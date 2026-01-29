@@ -896,17 +896,6 @@ var (
 		[]string{"supplier", "error_type"}, // error_type: balance_query, stake_query
 	)
 
-	// Meter cleanup metrics (unused - reserved for future meter cleanup tracking)
-	// meterCleanupPublished = observability.MinerFactory.NewCounterVec(
-	// 	prometheus.CounterOpts{
-	// 		Namespace: metricsNamespace,
-	// 		Subsystem: metricsSubsystem,
-	// 		Name:      "meter_cleanup_published_total",
-	// 		Help:      "Total number of meter cleanup signals published",
-	// 	},
-	// 	[]string{"supplier"},
-	// )
-
 	// Late relay detection metrics - tracks relays that arrived but weren't consumed before claim
 
 	sessionLateRelays = observability.MinerFactory.NewCounterVec(

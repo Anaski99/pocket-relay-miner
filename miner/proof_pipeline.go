@@ -14,6 +14,23 @@ import (
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
+const (
+	// DefaultMaxProofsPerBatch is the default maximum number of proofs per transaction batch.
+	DefaultMaxProofsPerBatch = 10
+
+	// DefaultBatchWaitTime is the default time to wait accumulating proofs before submitting.
+	DefaultBatchWaitTime = 5 * time.Second
+
+	// DefaultProofRetryAttempts is the default number of times to retry failed proofs.
+	DefaultProofRetryAttempts = 3
+
+	// DefaultProofRetryDelay is the default delay between retry attempts.
+	DefaultProofRetryDelay = 1 * time.Second
+
+	// ProofQueueSize is the buffer size for the proof submission queue.
+	ProofQueueSize = 2000
+)
+
 // ProofPipelineConfig contains configuration for the proof pipeline.
 type ProofPipelineConfig struct {
 	// SupplierAddress is the supplier this pipeline is for.
@@ -35,10 +52,10 @@ type ProofPipelineConfig struct {
 // DefaultProofPipelineConfig returns sensible defaults.
 func DefaultProofPipelineConfig() ProofPipelineConfig {
 	return ProofPipelineConfig{
-		MaxProofsPerBatch:  10,
-		BatchWaitTime:      5 * time.Second,
-		ProofRetryAttempts: 3,
-		ProofRetryDelay:    1 * time.Second,
+		MaxProofsPerBatch:  DefaultMaxProofsPerBatch,
+		BatchWaitTime:      DefaultBatchWaitTime,
+		ProofRetryAttempts: DefaultProofRetryAttempts,
+		ProofRetryDelay:    DefaultProofRetryDelay,
 	}
 }
 
@@ -118,16 +135,16 @@ func NewProofPipeline(
 	config ProofPipelineConfig,
 ) *ProofPipeline {
 	if config.MaxProofsPerBatch <= 0 {
-		config.MaxProofsPerBatch = 10
+		config.MaxProofsPerBatch = DefaultMaxProofsPerBatch
 	}
 	if config.BatchWaitTime <= 0 {
-		config.BatchWaitTime = 5 * time.Second
+		config.BatchWaitTime = DefaultBatchWaitTime
 	}
 	if config.ProofRetryAttempts <= 0 {
-		config.ProofRetryAttempts = 3
+		config.ProofRetryAttempts = DefaultProofRetryAttempts
 	}
 	if config.ProofRetryDelay <= 0 {
-		config.ProofRetryDelay = 1 * time.Second
+		config.ProofRetryDelay = DefaultProofRetryDelay
 	}
 
 	return &ProofPipeline{
@@ -138,7 +155,7 @@ func NewProofPipeline(
 		proofClient:   proofClient,
 		blockClient:   blockClient,
 		smstProver:    smstProver,
-		proofQueue:    make(chan *ProofRequest, 2000),
+		proofQueue:    make(chan *ProofRequest, ProofQueueSize),
 		pendingProofs: make([]*ProofRequest, 0, config.MaxProofsPerBatch),
 	}
 }
