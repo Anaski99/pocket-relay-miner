@@ -14,11 +14,11 @@
 
 **Phase:** 2 of 6 (Characterization Tests)
 
-**Plan:** 04 of 04 in Phase 2 - COMPLETE
+**Plan:** 05 of 05 in Phase 2 - COMPLETE
 
 **Status:** Phase complete
 
-**Last activity:** 2026-02-02 - Completed 02-04-PLAN.md (Relayer characterization tests)
+**Last activity:** 2026-02-02 - Completed 02-05-PLAN.md (Coverage tracking infrastructure)
 
 **Progress:**
 ```
@@ -31,7 +31,7 @@
 
 ## Performance Metrics
 
-**Velocity:** ~25 min per plan average (02-04 took 35 min due to import cycle issues)
+**Velocity:** ~25 min per plan average (02-05 took 3 min - infrastructure only)
 
 **Quality:**
 - Tests passing: All existing tests (50/50 stability validation with race detection)
@@ -40,7 +40,8 @@
 - Vulnerability scanning: govulncheck in CI (01-03)
 - Stability testing: Nightly 100-run workflow (01-03) + 50-run validation complete (01-04)
 - Test quality: Comprehensive audit complete (66 time.Sleep violations documented, 3 races addressed)
-- Coverage: miner/session_lifecycle.go 81.3% average, miner/ overall improving
+- Coverage tracking: Per-package measurement with CI integration (02-05)
+- Coverage baseline: miner/ 2.0%, relayer/ 0.0%, cache/ 0.0%, total 0.9%
 - testutil package: Complete with 10/10 consecutive test runs passing
 - Lifecycle callback tests: 31 tests (23 state + 8 concurrent), 10/10 stability runs
 - Session lifecycle tests: 2103 lines covering state machine + concurrency
@@ -76,12 +77,14 @@
 | 100 goroutines for CI concurrency tests | Sufficient for race detection; nightly can use 1000 | 2026-02-02 |
 | Local mocks for relayer tests | Import cycle (testutil → miner → relayer) requires local mock implementations | 2026-02-02 |
 | Document actual error handling order | Characterization tests capture behavior (500 vs 400) not prescribe expected | 2026-02-02 |
+| Coverage warning-only in CI | Current coverage is low; failures would block all PRs | 2026-02-02 |
+| Per-package coverage tracking | Track miner/, relayer/, cache/ separately for targeted improvement | 2026-02-02 |
 
 ### Key Findings
 
 - **66 time.Sleep() violations** documented in audit (not 64 from research) — causes flaky tests, documented for Phase 3 cleanup
 - **4 race conditions identified** during stability validation: 2 fixed in test infrastructure, 2 skipped with TODO comments, 1 new in UpdateSessionRelayCount
-- **Coverage gaps confirmed:** relayer/ 0.0%, cache/ 0.0%, miner/ improving — cache/ is HIGH PRIORITY for Phase 2
+- **Coverage baseline established:** miner/ 2.0%, relayer/ 0.0%, cache/ 0.0%, total 0.9%
 - **50-run stability validation:** 100% pass rate with race detection and shuffle enabled
 - **Test quality baseline established:** No global state dependencies, 1 acceptable crypto/rand usage
 - **Three large files** need refactoring: lifecycle_callback.go (1898 lines), session_lifecycle.go (1207 lines), proxy.go (1842 lines)
@@ -109,14 +112,15 @@
 - [x] Lifecycle callback characterization tests - 31 tests (02-02)
 - [x] Session lifecycle characterization tests - 2103 lines, 81.3% coverage (02-03)
 - [x] Relayer characterization tests - 2518 lines, proxy + relay processor (02-04)
+- [x] Coverage tracking infrastructure - scripts/test-coverage.sh + CI integration (02-05)
 
 **Phase 3 (Upcoming):**
 - [ ] Add cache/ package unit tests (0% coverage - HIGH PRIORITY)
-- [ ] Add relayer/ package unit tests (improve coverage from 6.8%)
+- [ ] Add relayer/ package unit tests (improve coverage from 0.0%)
 - [ ] Fix 66 time.Sleep violations in tests (causes flaky behavior)
 - [ ] Fix 4 production code races (runtime metrics collector, tx client mock, UpdateSessionRelayCount)
 - [ ] Fix 262 lint violations (220 errcheck, 42 gosec)
-- [ ] Improve miner/ coverage from 14.9% to 80%+
+- [ ] Improve miner/ coverage from 2.0% to 80%+
 
 ### Blockers
 
@@ -124,9 +128,9 @@ None currently. External dependencies (WebSocket handshake spec, historical para
 
 ## Session Continuity
 
-**Last session:** 2026-02-02 22:57:00 UTC
+**Last session:** 2026-02-02 23:02:00 UTC
 
-**Stopped at:** Completed 02-04-PLAN.md (Relayer characterization tests)
+**Stopped at:** Completed 02-05-PLAN.md (Coverage tracking infrastructure)
 
 **Resume file:** None (Phase 2 complete)
 
@@ -136,6 +140,7 @@ None currently. External dependencies (WebSocket handshake spec, historical para
 - **Test Quality Standards:** Use miniredis for Redis (not mocks), all tests pass `go test -race`, deterministic data only
 - **Performance Target:** 1000+ RPS per relayer replica must be maintained through refactoring
 - **Coverage Goal:** 80%+ enforcement on critical paths (miner/, relayer/, cache/)
+- **Coverage Baseline:** miner/ 2.0%, relayer/ 0.0%, cache/ 0.0%, total 0.9%
 - **testutil patterns:** SessionBuilder(seed).Build(), RelayBuilder(seed).BuildN(n), embed RedisTestSuite
 - **Lifecycle callback test patterns:** Use local mocks with `lc*`/`conc*` prefixes due to import cycle
 - **Session lifecycle test patterns:** Use slc* prefix for package-local mocks
