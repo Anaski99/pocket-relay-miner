@@ -6,7 +6,7 @@
 
 **Core Value:** Test confidence — comprehensive coverage that enables safe refactoring and prevents regressions
 
-**Current Focus:** Characterization Tests (Phase 2) - In progress
+**Current Focus:** Characterization Tests (Phase 2) - COMPLETE
 
 **Context:** Quality hardening milestone for pocket-relay-miner addressing tech debt from 1-month rebuild. System is production-grade (1000+ RPS), handling real money on Pocket Network. Goal: Enable fearless refactoring via comprehensive test coverage (80%+ on critical paths).
 
@@ -14,24 +14,24 @@
 
 **Phase:** 2 of 6 (Characterization Tests)
 
-**Plan:** 03 of 04 in Phase 2 - COMPLETE
+**Plan:** 04 of 04 in Phase 2 - COMPLETE
 
-**Status:** In progress
+**Status:** Phase complete
 
-**Last activity:** 2026-02-02 - Completed 02-03-PLAN.md (Session lifecycle characterization tests)
+**Last activity:** 2026-02-02 - Completed 02-04-PLAN.md (Relayer characterization tests)
 
 **Progress:**
 ```
 [Phase 1: Test Foundation ████████████████████████████████████] 100%
-[Phase 2: Characterization █████████████████████████░░░░░░░░░░]  75%
+[Phase 2: Characterization ████████████████████████████████████] 100%
 ```
 
 **Next Steps:**
-1. Execute 02-04-PLAN.md (Cache behavior characterization tests)
+1. Begin Phase 3 planning (Refactoring)
 
 ## Performance Metrics
 
-**Velocity:** ~15 min per plan (based on 02-03)
+**Velocity:** ~25 min per plan average (02-04 took 35 min due to import cycle issues)
 
 **Quality:**
 - Tests passing: All existing tests (50/50 stability validation with race detection)
@@ -44,6 +44,7 @@
 - testutil package: Complete with 10/10 consecutive test runs passing
 - Lifecycle callback tests: 31 tests (23 state + 8 concurrent), 10/10 stability runs
 - Session lifecycle tests: 2103 lines covering state machine + concurrency
+- Relayer tests: 2518 lines across proxy_test.go, proxy_concurrent_test.go, relay_processor_test.go
 
 **Blockers:** None
 
@@ -73,6 +74,8 @@
 | Characterize actual behavior | Document CreateClaims called with 0 messages (optimization opportunity) | 2026-02-02 |
 | Package-local mocks for import cycles | Created slc* types in miner tests to avoid testutil import cycle | 2026-02-02 |
 | 100 goroutines for CI concurrency tests | Sufficient for race detection; nightly can use 1000 | 2026-02-02 |
+| Local mocks for relayer tests | Import cycle (testutil → miner → relayer) requires local mock implementations | 2026-02-02 |
+| Document actual error handling order | Characterization tests capture behavior (500 vs 400) not prescribe expected | 2026-02-02 |
 
 ### Key Findings
 
@@ -86,7 +89,8 @@
 - **Lifecycle callback coverage:** OnSessionsNeedClaim 70.5%, OnSessionsNeedProof 59.9%, terminal callbacks 72-76%
 - **Session lifecycle coverage:** 81.3% average function coverage with state machine and concurrency tests
 - **UpdateSessionRelayCount race:** Discovered in 02-03, uses non-atomic fields without mutex (Phase 3 fix)
-- **Import cycle:** testutil cannot be used in miner tests due to testutil importing miner
+- **Import cycle:** testutil cannot be used in miner tests or relayer tests due to import cycles
+- **Relayer error handling order:** Supplier cache check happens before service validation, affecting error codes
 
 ### TODOs
 
@@ -100,15 +104,15 @@
 - [x] Measure baseline test coverage - Documented in audit (01-04)
 - [x] Validate test stability - 50-run validation 100% pass rate (01-04)
 
-**Phase 2 (In Progress):**
+**Phase 2 (Complete):**
 - [x] Create testutil package - testutil/ with builders, keys, RedisTestSuite (02-01)
 - [x] Lifecycle callback characterization tests - 31 tests (02-02)
 - [x] Session lifecycle characterization tests - 2103 lines, 81.3% coverage (02-03)
-- [ ] Cache behavior characterization tests (02-04)
+- [x] Relayer characterization tests - 2518 lines, proxy + relay processor (02-04)
 
-**Phase 2/3 (Deferred):**
+**Phase 3 (Upcoming):**
 - [ ] Add cache/ package unit tests (0% coverage - HIGH PRIORITY)
-- [ ] Add relayer/ package unit tests (0% coverage)
+- [ ] Add relayer/ package unit tests (improve coverage from 6.8%)
 - [ ] Fix 66 time.Sleep violations in tests (causes flaky behavior)
 - [ ] Fix 4 production code races (runtime metrics collector, tx client mock, UpdateSessionRelayCount)
 - [ ] Fix 262 lint violations (220 errcheck, 42 gosec)
@@ -120,11 +124,11 @@ None currently. External dependencies (WebSocket handshake spec, historical para
 
 ## Session Continuity
 
-**Last session:** 2026-02-02 22:52:00 UTC
+**Last session:** 2026-02-02 22:57:00 UTC
 
-**Stopped at:** Completed 02-03-PLAN.md (Session lifecycle characterization tests)
+**Stopped at:** Completed 02-04-PLAN.md (Relayer characterization tests)
 
-**Resume file:** None (ready for 02-04)
+**Resume file:** None (Phase 2 complete)
 
 **Context to Preserve:**
 
@@ -136,6 +140,7 @@ None currently. External dependencies (WebSocket handshake spec, historical para
 - **Lifecycle callback test patterns:** Use local mocks with `lc*`/`conc*` prefixes due to import cycle
 - **Session lifecycle test patterns:** Use slc* prefix for package-local mocks
 - **Window calculation pattern:** Fixed session heights (100) for deterministic claim (102-106) and proof (106-110) windows
+- **Relayer test patterns:** Use local mock implementations, document actual behavior order
 
 **Open Questions:**
 
