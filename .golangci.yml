@@ -31,6 +31,11 @@ linters:
     # Style (enforces beyond gofmt)
     - whitespace        # Extra whitespace
 
+# Formatters (goimports is a formatter in golangci-lint v2)
+formatters:
+  enable:
+    - goimports         # Import grouping and formatting
+
   settings:
     errcheck:
       check-blank: true           # error assignment to blank identifier - STRICT

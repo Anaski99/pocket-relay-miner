@@ -1,9 +1,9 @@
 package miner
 
 import (
-	"errors"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sync"
 	"time"

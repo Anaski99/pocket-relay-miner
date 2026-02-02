@@ -1,8 +1,8 @@
 package miner
 
 import (
-	"errors"
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
