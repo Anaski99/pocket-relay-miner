@@ -14,21 +14,19 @@
 
 **Phase:** 1 of 6 (Test Foundation)
 
-**Plan:** 01 of 04 in Phase 1
+**Plan:** 03 of 04 in Phase 1
 
 **Status:** In progress
 
-**Last activity:** 2026-02-02 - Completed 01-01-PLAN.md (Linting configuration)
+**Last activity:** 2026-02-02 - Completed 01-03-PLAN.md (CI vulnerability scanning and nightly stability)
 
 **Progress:**
 ```
-[Phase 1: Test Foundation ██████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 12.5%
+[Phase 1: Test Foundation ██████████████████████████░░░░░░░░░░] 75%
 ```
 
 **Next Steps:**
-1. Execute 01-02-PLAN.md (CI/CD integration)
-2. Execute 01-03-PLAN.md (Vulnerability scanning)
-3. Execute 01-04-PLAN.md (Test quality audit)
+1. Execute 01-04-PLAN.md (Test quality audit)
 
 ## Performance Metrics
 
@@ -37,8 +35,10 @@
 **Quality:**
 - Tests passing: All existing tests (baseline)
 - Linting: ✅ golangci-lint configured (262 violations inventoried for Phase 2/3)
-- Race detection: Not yet enabled (01-02)
-- Coverage: Unknown (needs baseline measurement in 01-03)
+- Race detection: ✅ Enabled via make test (01-02)
+- Vulnerability scanning: ✅ govulncheck in CI (01-03)
+- Stability testing: ✅ Nightly 100-run workflow (01-03)
+- Coverage: Unknown (needs baseline measurement in 01-04)
 
 **Blockers:** None
 
@@ -54,6 +54,9 @@
 | Lenient complexity thresholds in Phase 1 | funlen:600/220, gocognit:250, gocyclo:80 calibrated to existing code; tighten in Phase 4 | 2026-02-02 |
 | golangci-lint v2 format | Uses linters.settings (nested) not linters-settings (top-level) | 2026-02-02 |
 | Defer 262 violations to Phase 2/3 | Automatic fixes only (41); manual fixes (262) require non-trivial changes beyond Phase 1 scope | 2026-02-02 |
+| govulncheck fails on ALL vulnerabilities | Maximum security - not just HIGH/CRITICAL | 2026-02-02 |
+| Nightly stability at 2 AM UTC | Off-peak time for long-running 100-iteration tests | 2026-02-02 |
+| Docker builds depend on all quality gates | lint, fmt, test, vuln-check must pass before deployment | 2026-02-02 |
 
 ### Key Findings
 
@@ -65,10 +68,13 @@
 ### TODOs
 
 - [x] Create golangci-lint configuration - ✅ .golangci.yml created
-- [ ] Integrate linter into CI (01-02)
-- [ ] Fix 262 remaining lint violations (Phase 2/3: 220 errcheck, 42 gosec)
-- [ ] Add vulnerability scanning (01-03)
+- [x] Integrate linter into CI - ✅ golangci-lint in CI (01-01)
+- [x] Enable race detection - ✅ make test includes -race (01-02)
+- [x] Create stability test script - ✅ scripts/test-stability.sh (01-02)
+- [x] Add vulnerability scanning - ✅ govulncheck in CI (01-03)
+- [x] Create nightly stability workflow - ✅ .github/workflows/nightly-stability.yml (01-03)
 - [ ] Measure baseline test coverage (01-04)
+- [ ] Fix 262 remaining lint violations (Phase 2/3: 220 errcheck, 42 gosec)
 
 ### Blockers
 
@@ -76,11 +82,11 @@ None currently. External dependencies (WebSocket handshake spec, historical para
 
 ## Session Continuity
 
-**Last session:** 2026-02-02 20:35:53 UTC
+**Last session:** 2026-02-02 22:42:13 UTC
 
-**Stopped at:** Completed 01-01-PLAN.md
+**Stopped at:** Completed 01-03-PLAN.md
 
-**Resume file:** None (phase in progress, continue with 01-02-PLAN.md)
+**Resume file:** None (phase in progress, continue with 01-04-PLAN.md)
 
 **Context to Preserve:**
 
