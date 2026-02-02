@@ -209,22 +209,27 @@ func (m *mockCometBFTServer) handleUnsubscribe(conn *websocket.Conn, req map[str
 // handleUnsubscribeAll handles unsubscribe_all requests.
 func (m *mockCometBFTServer) handleUnsubscribeAll(conn *websocket.Conn, req map[string]interface{}) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	for _, ch := range m.subscriptions {
 		close(ch)
 	}
 	m.subscriptions = make(map[string]chan blockEvent)
-	m.mu.Unlock()
 
 	response := map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      req["id"],
 		"result":  map[string]interface{}{},
 	}
+	// WriteJSON must be protected by mutex (gorilla/websocket requires external synchronization)
 	_ = conn.WriteJSON(response)
 }
 
 // sendBlockEvent sends a block event to a WebSocket connection.
 func (m *mockCometBFTServer) sendBlockEvent(conn *websocket.Conn, event blockEvent) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	message := map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      "ha-block-subscriber#event",
@@ -244,6 +249,7 @@ func (m *mockCometBFTServer) sendBlockEvent(conn *websocket.Conn, event blockEve
 		},
 	}
 
+	// WriteJSON must be protected by mutex (gorilla/websocket requires external synchronization)
 	_ = conn.WriteJSON(message)
 }
 
