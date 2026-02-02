@@ -408,24 +408,12 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 		}
 	}
 
-	// Decompress RelayBytes if compressed (backwards compatible with uncompressed data)
-	relayBytes, decompErr := transport.DecompressRelayBytes(msg.Message.RelayBytes)
-	if decompErr != nil {
-		w.logger.Warn().
-			Err(decompErr).
-			Str("session_id", msg.Message.SessionId).
-			Str("supplier", supplierAddr).
-			Msg("failed to decompress relay bytes - discarding relay")
-		RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, msg.Message.SessionId, "decompression_error")
-		return nil // ACK and discard - corrupted data
-	}
-
-	// Update SMST with decompressed relay bytes
+	// Update SMST with relay bytes
 	if err := state.SMSTManager.UpdateTree(
 		ctx,
 		msg.Message.SessionId,
 		msg.Message.RelayHash,
-		relayBytes, // Use decompressed bytes
+		msg.Message.RelayBytes,
 		msg.Message.ComputeUnitsPerRelay,
 	); err != nil {
 		// Check for permanent SMST errors (late relays, sealed/claimed sessions)
