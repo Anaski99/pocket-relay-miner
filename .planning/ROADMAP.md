@@ -30,6 +30,14 @@ Transform pocket-relay-miner from a fast rebuild to a maintainable, test-confide
 4. Test audit document created identifying all time.Sleep() violations, global state dependencies, and non-deterministic data generation
 5. Flaky test report shows 100/100 pass rate for all existing tests
 
+**Plans:** 4 plans
+
+Plans:
+- [ ] 01-01-PLAN.md — Create strict golangci-lint configuration
+- [ ] 01-02-PLAN.md — Enable race detection and create stability script
+- [ ] 01-03-PLAN.md — Update CI with govulncheck and nightly stability
+- [ ] 01-04-PLAN.md — Create test quality audit and run stability validation
+
 ---
 
 ### Phase 2: Characterization Tests
@@ -137,7 +145,7 @@ Transform pocket-relay-miner from a fast rebuild to a maintainable, test-confide
 
 | Phase | Status | Requirements | Progress |
 |-------|--------|--------------|----------|
-| Phase 1: Test Foundation | Pending | INFRA-01, INFRA-02, INFRA-03, QUAL-02, QUAL-03 | 0% |
+| Phase 1: Test Foundation | Planned | INFRA-01, INFRA-02, INFRA-03, QUAL-02, QUAL-03 | 0% |
 | Phase 2: Characterization Tests | Pending | CHAR-01, CHAR-02, CHAR-03, INFRA-04 | 0% |
 | Phase 3: Test Quality Cleanup | Pending | QUAL-01 | 0% |
 | Phase 4: Code Structure Refactoring | Pending | STRUCT-01, STRUCT-02 | 0% |
