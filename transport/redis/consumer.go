@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -188,7 +189,7 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 				return ctx.Err()
 			}
 
-			if err == redis.Nil {
+			if errors.Is(err, redis.Nil) {
 				// With BLOCK 0, this shouldn't happen often (only on timeout which we don't have)
 				// But handle it gracefully - consider claiming idle messages
 				c.claimMu.Lock()

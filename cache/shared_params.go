@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"errors"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -150,7 +151,7 @@ func (c *RedisSharedParamCache) GetSharedParams(ctx context.Context, height int6
 			return params, nil
 		}
 	}
-	if err != nil && err != redis.Nil {
+	if err != nil && !errors.Is(err, redis.Nil) {
 		c.logger.Warn().Err(err).Msg("error fetching from Redis cache")
 	}
 	cacheMisses.WithLabelValues("shared_params", "l2").Inc()
@@ -281,7 +282,7 @@ func (c *RedisSharedParamCache) WarmupFromRedis(ctx context.Context) error {
 	key := c.keys.SharedParams(height)
 	data, err := c.redisClient.Get(ctx, key).Bytes()
 	if err != nil {
-		if err == redis.Nil {
+		if errors.Is(err, redis.Nil) {
 			// Not in cache yet, that's OK
 			c.logger.Debug().Int64("height", height).Msg("shared params not in Redis, will be loaded on first query")
 			return nil

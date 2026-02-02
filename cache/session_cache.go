@@ -285,7 +285,7 @@ func (c *RedisSessionCache) GetSessionValidation(ctx context.Context, appAddress
 
 	data, err := c.redisClient.Get(ctx, key).Bytes()
 	if err != nil {
-		if err == redis.Nil {
+		if errors.Is(err, redis.Nil) {
 			return nil, nil // No cached result
 		}
 		return nil, fmt.Errorf("failed to get validation result: %w", err)
@@ -342,7 +342,7 @@ func (c *RedisSessionCache) IsSessionRewardable(ctx context.Context, sessionId s
 	// L2: Check Redis
 	key := c.keys.SessionRewardable(sessionId)
 	val, err := c.redisClient.Get(ctx, key).Result()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		// Not found = assume rewardable (default state)
 		sessionRewardableChecks.WithLabelValues("rewardable").Inc()
 		return true

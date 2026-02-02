@@ -3,6 +3,7 @@ package relayer
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net/http"
 	"net/url"
 	"sync"
@@ -815,7 +816,8 @@ func (b *WebSocketBridge) clearLatestRequest() {
 // logCloseError parses and logs WebSocket close errors with proper RFC 6455 codes.
 func (b *WebSocketBridge) logCloseError(err error, source wsMessageSource) {
 	// Try to extract close code from error
-	closeErr, ok := err.(*websocket.CloseError)
+	closeErr := &websocket.CloseError{}
+	ok := errors.As(err, &closeErr)
 	if ok {
 		// Log with structured close code info
 		b.logger.Debug().
@@ -838,7 +840,8 @@ func (b *WebSocketBridge) logCloseError(err error, source wsMessageSource) {
 // Returns 0 and empty string if the error is not a close error.
 // This is used to propagate close codes bidirectionally through the bridge.
 func extractCloseInfo(err error) (int, string) {
-	closeErr, ok := err.(*websocket.CloseError)
+	closeErr := &websocket.CloseError{}
+	ok := errors.As(err, &closeErr)
 	if ok {
 		return closeErr.Code, closeErr.Text
 	}

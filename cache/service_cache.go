@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"errors"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -457,7 +458,7 @@ func (c *serviceCache) handleInvalidation(ctx context.Context, payload string) e
 					Str(logging.FieldServiceID, event.ServiceID).
 					Msg("failed to unmarshal service during eager reload")
 			}
-		} else if err != redis.Nil {
+		} else if !errors.Is(err, redis.Nil) {
 			c.logger.Warn().
 				Err(err).
 				Str(logging.FieldServiceID, event.ServiceID).

@@ -1,6 +1,7 @@
 package redis
 
 import (
+	"errors"
 	"context"
 	"fmt"
 	"os"
@@ -96,7 +97,7 @@ func inspectAppStake(ctx context.Context, client *DebugRedisClient, appAddr stri
 	key := fmt.Sprintf("ha:app_stake:%s", appAddr)
 
 	val, err := client.Get(ctx, key).Result()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		fmt.Printf("No app stake data found for: %s\n", appAddr)
 		return nil
 	}
@@ -118,7 +119,7 @@ func inspectServiceParams(ctx context.Context, client *DebugRedisClient, service
 	key := fmt.Sprintf("ha:service:%s:compute_units", serviceID)
 
 	val, err := client.Get(ctx, key).Result()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		fmt.Printf("No service params found for: %s\n", serviceID)
 		return nil
 	}
@@ -147,7 +148,7 @@ func inspectGlobalParams(ctx context.Context, client *DebugRedisClient) error {
 
 	for _, key := range keys {
 		val, err := client.Get(ctx, key).Result()
-		if err == redis.Nil {
+		if errors.Is(err, redis.Nil) {
 			fmt.Printf("%s: Not found\n\n", key)
 			continue
 		}

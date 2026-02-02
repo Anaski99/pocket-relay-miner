@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"errors"
 	"context"
 	"fmt"
 	"sync"
@@ -390,7 +391,7 @@ func (c *proofParamsCache) handleInvalidation(ctx context.Context, payload strin
 				Err(err).
 				Msg("failed to unmarshal proof params during eager reload")
 		}
-	} else if err != redis.Nil {
+	} else if !errors.Is(err, redis.Nil) {
 		c.logger.Warn().
 			Err(err).
 			Msg("failed to eagerly reload proof params from L2")

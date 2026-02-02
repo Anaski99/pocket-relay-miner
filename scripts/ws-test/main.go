@@ -16,6 +16,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -149,7 +150,7 @@ func (c *wsClient) connect() error {
 	conn, resp, err := c.dialer.Dial(c.url, c.header)
 	if err != nil {
 		if resp != nil {
-			return fmt.Errorf("%v (HTTP %d)", err, resp.StatusCode)
+			return fmt.Errorf("%w (HTTP %d)", err, resp.StatusCode)
 		}
 		return err
 	}
@@ -233,7 +234,8 @@ func (c *wsClient) readLoop() {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
 			// Extract close code if available
-			if closeErr, ok := err.(*websocket.CloseError); ok {
+			closeErr := &websocket.CloseError{}
+			if errors.As(err, &closeErr) {
 				c.closeCode = closeErr.Code
 				c.closeText = closeErr.Text
 				fmt.Printf("[%s] 🔌 CONNECTION CLOSED: code=%d (%s) text=%q\n",

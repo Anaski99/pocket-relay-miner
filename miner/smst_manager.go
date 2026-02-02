@@ -126,7 +126,7 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 	}
 
 	if err := tree.trie.Update(key, value, weight); err != nil {
-		return fmt.Errorf("%w: %v", ErrSMSTUpdateFailed, err)
+		return fmt.Errorf("%w: %w", ErrSMSTUpdateFailed, err)
 	}
 
 	// CRITICAL: Log successful SMST update for debugging
@@ -144,7 +144,7 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 
 	// Commit to persist dirty nodes to Redis (critical for HA)
 	if err := tree.trie.Commit(); err != nil {
-		return fmt.Errorf("%w: %v", ErrSMSTCommitFailed, err)
+		return fmt.Errorf("%w: %w", ErrSMSTCommitFailed, err)
 	}
 
 	// Flush buffered operations to Redis
@@ -153,7 +153,7 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 	if redisStore, ok := tree.store.(*RedisMapStore); ok {
 		if err := redisStore.FlushPipeline(); err != nil {
 			// Return wrapped error - IsRetryableError will check for net.Error underneath
-			return fmt.Errorf("%w: flush pipeline: %v", ErrSMSTCommitFailed, err)
+			return fmt.Errorf("%w: flush pipeline: %w", ErrSMSTCommitFailed, err)
 		}
 	}
 

@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"errors"
 	"context"
 	"encoding/hex"
 	"fmt"
@@ -82,7 +83,7 @@ func (s *RedisMapStore) Get(key []byte) ([]byte, error) {
 	field := hex.EncodeToString(key)
 
 	val, err := s.redisClient.HGet(s.ctx, s.hashKey, field).Bytes()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		observability.SMSTRedisOperations.WithLabelValues("get", "not_found").Inc()
 		return nil, nil // Key not found - return nil, nil per interface contract
 	}

@@ -379,7 +379,6 @@ func GetRingAddressesAtSessionEndHeight(
 			// Mark the gateway address as added to avoid duplicates.
 			addedDelegations[gatewayAddress] = struct{}{}
 		}
-
 	}
 
 	return activeDelegationsAtHeight

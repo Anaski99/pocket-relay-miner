@@ -2,6 +2,7 @@ package miner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sync"
@@ -551,7 +552,7 @@ func (c *SupplierClaimer) renewAllClaims() {
 		// Renew only if we still own it (check-and-renew)
 		owner, err := c.redisClient.Get(c.ctx, claimKey).Result()
 		if err != nil {
-			if err == redis.Nil {
+			if errors.Is(err, redis.Nil) {
 				// Claim expired, try to reclaim
 				c.logger.Warn().
 					Str("supplier", supplier).

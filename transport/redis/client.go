@@ -166,7 +166,7 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 	if err = client.Ping(ctx).Err(); err != nil {
 		// Close the client to prevent resource leak
 		if closeErr := client.Close(); closeErr != nil {
-			return nil, fmt.Errorf("failed to connect to redis: %w (close error: %v)", err, closeErr)
+			return nil, fmt.Errorf("failed to connect to redis: %w (close error: %w)", err, closeErr)
 		}
 		return nil, fmt.Errorf("failed to connect to redis: %w", err)
 	}

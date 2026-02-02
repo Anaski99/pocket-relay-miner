@@ -1,6 +1,7 @@
 package redis
 
 import (
+	"errors"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -66,7 +67,7 @@ func showSession(ctx context.Context, client *DebugRedisClient, supplier, sessio
 	key := fmt.Sprintf("ha:miner:sessions:%s:%s", supplier, sessionID)
 
 	data, err := client.Get(ctx, key).Bytes()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 	if err != nil {
@@ -147,14 +148,14 @@ func fetchAndDisplaySessions(ctx context.Context, client *DebugRedisClient, supp
 	}
 
 	_, err := pipe.Exec(ctx)
-	if err != nil && err != redis.Nil {
+	if err != nil && !errors.Is(err, redis.Nil) {
 		return fmt.Errorf("failed to fetch sessions: %w", err)
 	}
 
 	var sessions []map[string]interface{}
 	for _, cmd := range cmds {
 		data, err := cmd.Bytes()
-		if err == redis.Nil {
+		if errors.Is(err, redis.Nil) {
 			continue
 		}
 		if err != nil {

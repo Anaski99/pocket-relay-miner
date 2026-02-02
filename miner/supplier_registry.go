@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"errors"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -177,7 +178,7 @@ func (r *SupplierRegistry) GetSupplier(ctx context.Context, operatorAddr string)
 
 	data, err := r.redisClient.Get(ctx, key).Bytes()
 	if err != nil {
-		if err == redis.Nil {
+		if errors.Is(err, redis.Nil) {
 			return nil, nil // Not found
 		}
 		return nil, fmt.Errorf("failed to get supplier data: %w", err)

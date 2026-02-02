@@ -1,6 +1,7 @@
 package redis
 
 import (
+	"errors"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -98,7 +99,7 @@ func showSubmission(ctx context.Context, client *DebugRedisClient, supplier stri
 	key := fmt.Sprintf("ha:tx:track:%s:%d:%s", supplier, sessionEnd, sessionID)
 
 	data, err := client.Get(ctx, key).Bytes()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return fmt.Errorf("submission tracking record not found: %s (session_end: %d)", sessionID, sessionEnd)
 	}
 	if err != nil {

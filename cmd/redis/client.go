@@ -51,7 +51,7 @@ func CreateRedisClient(ctx context.Context) (*DebugRedisClient, error) {
 					Str("type", "relayer").
 					Msg("loaded namespace config from relayer config")
 			} else {
-				return nil, fmt.Errorf("failed to load config as miner or relayer: miner_err=%v, relayer_err=%v", minerErr, relayerErr)
+				return nil, fmt.Errorf("failed to load config as miner or relayer: miner_err=%w, relayer_err=%w", minerErr, relayerErr)
 			}
 		}
 	} else {

@@ -403,7 +403,7 @@ func (c *sharedParamsCache) handleInvalidation(ctx context.Context, payload stri
 				Err(err).
 				Msg("failed to unmarshal shared params during eager reload")
 		}
-	} else if err != redis.Nil {
+	} else if !errors.Is(err, redis.Nil) {
 		c.logger.Warn().
 			Err(err).
 			Msg("failed to eagerly reload shared params from L2")

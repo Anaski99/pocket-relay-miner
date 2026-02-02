@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"errors"
 	"context"
 	"fmt"
 	"sync"
@@ -246,7 +247,7 @@ func (e *RedisLeaderElector) releaseLock(ctx context.Context) error {
 	`)
 
 	_, err := script.Run(ctx, e.redisClient, []string{key}, e.config.InstanceID).Result()
-	if err != nil && err != redis.Nil {
+	if err != nil && !errors.Is(err, redis.Nil) {
 		return fmt.Errorf("failed to release lock: %w", err)
 	}
 
@@ -299,7 +300,7 @@ func (e *RedisLeaderElector) IsLeader() bool {
 func (e *RedisLeaderElector) LeaderID(ctx context.Context) (string, error) {
 	key := e.lockKey()
 	id, err := e.redisClient.Get(ctx, key).Result()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return "", nil // No leader
 	}
 	if err != nil {

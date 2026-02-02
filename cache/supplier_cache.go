@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"errors"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -189,7 +190,7 @@ func (c *SupplierCache) GetSupplierState(ctx context.Context, operatorAddress st
 	key := c.supplierKey(operatorAddress)
 	data, err := c.redis.Get(ctx, key).Bytes()
 	if err != nil {
-		if err == redis.Nil {
+		if errors.Is(err, redis.Nil) {
 			// Supplier not in cache
 			cacheMisses.WithLabelValues(supplierCacheType, "l2_not_found").Inc()
 			cacheGetLatency.WithLabelValues(supplierCacheType, "l2_not_found").Observe(time.Since(start).Seconds())
@@ -358,7 +359,7 @@ func (c *SupplierCache) GetAllSupplierStates(ctx context.Context) (map[string]*S
 	for _, key := range keys {
 		data, err := c.redis.Get(ctx, key).Bytes()
 		if err != nil {
-			if err == redis.Nil {
+			if errors.Is(err, redis.Nil) {
 				continue
 			}
 			return nil, fmt.Errorf("failed to get supplier state for key %s: %w", key, err)

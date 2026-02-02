@@ -1,6 +1,7 @@
 package relayer
 
 import (
+	"errors"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -467,7 +468,7 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 func (m *RelayMeter) getSessionMeta(ctx context.Context, sessionID string) (*SessionMeterMeta, error) {
 	data, err := m.redisClient.Get(ctx, m.metaKey(sessionID)).Bytes()
 	if err != nil {
-		if err == redis.Nil {
+		if errors.Is(err, redis.Nil) {
 			return nil, nil
 		}
 		return nil, err

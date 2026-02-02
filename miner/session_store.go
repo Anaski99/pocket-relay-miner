@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"errors"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -327,7 +328,7 @@ func (s *RedisSessionStore) Get(ctx context.Context, sessionID string) (*Session
 	key := s.sessionKey(sessionID)
 
 	data, err := s.redisClient.Get(ctx, key).Bytes()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return nil, nil // Not found
 	}
 	if err != nil {
@@ -363,14 +364,14 @@ func (s *RedisSessionStore) GetBySupplier(ctx context.Context) ([]*SessionSnapsh
 	}
 
 	_, err = pipe.Exec(ctx)
-	if err != nil && err != redis.Nil {
+	if err != nil && !errors.Is(err, redis.Nil) {
 		return nil, fmt.Errorf("failed to get session data: %w", err)
 	}
 
 	snapshots := make([]*SessionSnapshot, 0, len(sessionIDs))
 	for _, cmd := range cmds {
 		data, err := cmd.Bytes()
-		if err == redis.Nil {
+		if errors.Is(err, redis.Nil) {
 			continue // Session was deleted
 		}
 		if err != nil {
@@ -409,7 +410,7 @@ func (s *RedisSessionStore) GetByState(ctx context.Context, state SessionState) 
 	}
 
 	_, err = pipe.Exec(ctx)
-	if err != nil && err != redis.Nil {
+	if err != nil && !errors.Is(err, redis.Nil) {
 		return nil, fmt.Errorf("failed to get session data: %w", err)
 	}
 
