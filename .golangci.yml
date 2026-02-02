@@ -1,0 +1,58 @@
+# golangci-lint configuration for pocket-relay-miner
+# Strategy: Strict error checking NOW, lenient complexity NOW (tighten in Phase 4)
+# Phase 1 Plan 01-01: Test Foundation - Linting Infrastructure
+
+version: 2
+
+linters:
+  # Disable all linters by default
+  disable-all: true
+
+  # Enable specific linters
+  enable:
+    # Error handling (STRICT - catches bugs, per CLAUDE.md error handling requirements)
+    - errcheck          # Unchecked errors - STRICT, no exceptions
+    - errorlint         # Error wrapping patterns
+
+    # Security (STRICT - catches vulnerabilities)
+    - gosec             # Security problems - STRICT, no exceptions
+
+    # Code quality (STRICT - catches bugs)
+    - staticcheck       # Go vet++ - STRICT, no exceptions
+    - govet             # Official Go checker
+    - ineffassign       # Unused assignments
+    - unused            # Unused code
+
+    # Complexity (LENIENT - tighten in Phase 4 when refactoring is planned)
+    - gocognit          # Cognitive complexity
+    - gocyclo           # Cyclomatic complexity
+    - funlen            # Function length
+
+    # Style (enforces beyond gofmt)
+    - whitespace        # Extra whitespace
+
+  settings:
+    errcheck:
+      check-blank: true           # error assignment to blank identifier - STRICT
+      check-type-assertions: true # unchecked type assertions - STRICT
+
+    # LENIENT thresholds - existing code passes without refactoring
+    # Will be tightened in Phase 4: gocognit:15, gocyclo:15, funlen:80
+    gocognit:
+      min-complexity: 250          # Lenient (strict would be 15) - highest existing: 223
+
+    gocyclo:
+      min-complexity: 80          # Lenient (strict would be 15) - highest existing: 71
+
+    funlen:
+      lines: 600                  # Lenient (strict would be 80) - highest existing: 564
+      statements: 220             # Lenient (strict would be 50) - highest existing: 213
+
+run:
+  timeout: 5m
+  tests: true
+
+issues:
+  exclude-use-default: false    # No default exclusions
+  max-issues-per-linter: 0      # Report all issues
+  max-same-issues: 0            # Report all duplicates
