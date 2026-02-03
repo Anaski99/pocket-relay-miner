@@ -280,6 +280,74 @@ func (s *DeduplicatorTestSuite) TestDeduplicator_TTLExpires() {
 	s.Require().True(ttl <= 10*time.Second, "TTL should be <= 10 seconds")
 }
 
+// TestDeduplicator_StartAndClose verifies lifecycle management.
+func (s *DeduplicatorTestSuite) TestDeduplicator_StartAndClose() {
+	ctx := context.Background()
+
+	// Create new deduplicator (not started)
+	config := DeduplicatorConfig{
+		KeyPrefix:              "ha:miner:dedup",
+		TTLBlocks:              10,
+		BlockTimeSeconds:       1,
+		LocalCacheSize:         100,
+		CleanupIntervalSeconds: 1, // 1 second for faster test
+	}
+	logger := zerolog.Nop()
+	dedup := NewRedisDeduplicator(logger, s.RedisClient, config)
+
+	// Start background processes
+	err := dedup.Start(ctx)
+	s.Require().NoError(err)
+
+	// Verify operations work
+	sessionID := "lifecycle_session"
+	relayHash := []byte("lifecycle_relay")
+	err = dedup.MarkProcessed(ctx, relayHash, sessionID)
+	s.Require().NoError(err)
+
+	// Close gracefully
+	err = dedup.Close()
+	s.Require().NoError(err)
+
+	// Close again should be idempotent
+	err = dedup.Close()
+	s.Require().NoError(err)
+}
+
+// TestDeduplicator_LocalCacheCleanup verifies local cache cleanup for oversized sessions.
+func (s *DeduplicatorTestSuite) TestDeduplicator_LocalCacheCleanup() {
+	ctx := context.Background()
+
+	// Create deduplicator with small cache size
+	config := DeduplicatorConfig{
+		KeyPrefix:              "ha:miner:dedup",
+		TTLBlocks:              10,
+		BlockTimeSeconds:       1,
+		LocalCacheSize:         5, // Small size to trigger cleanup
+		CleanupIntervalSeconds: 60,
+	}
+	logger := zerolog.Nop()
+	dedup := NewRedisDeduplicator(logger, s.RedisClient, config)
+
+	sessionID := "cleanup_session"
+
+	// Add more than 2x the cache size to trigger cleanup
+	for i := 0; i < 15; i++ {
+		relayHash := []byte(fmt.Sprintf("cleanup_relay_%d", i))
+		err := dedup.MarkProcessed(ctx, relayHash, sessionID)
+		s.Require().NoError(err)
+	}
+
+	// Manually trigger cleanup (testing the cleanup logic)
+	dedup.cleanupLocalCache()
+
+	// After cleanup, local cache for this session should be cleared
+	// Verify by checking IsDuplicate still works (hits Redis, not local cache)
+	isDup, err := dedup.IsDuplicate(ctx, []byte("cleanup_relay_0"), sessionID)
+	s.Require().NoError(err)
+	s.Require().True(isDup, "should still be duplicate after local cache cleanup (from Redis)")
+}
+
 // TestDeduplicatorTestSuite runs the test suite.
 func TestDeduplicatorTestSuite(t *testing.T) {
 	suite.Run(t, new(DeduplicatorTestSuite))
