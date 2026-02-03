@@ -14,16 +14,16 @@
 
 **Phase:** 2 of 6 (Characterization Tests)
 
-**Plan:** 08 of 11 in Phase 2 - COMPLETE
+**Plan:** 09 of 11 in Phase 2 - COMPLETE
 
 **Status:** Gap closure execution in progress
 
-**Last activity:** 2026-02-03 - Completed 02-08-PLAN.md (gRPC transport characterization tests)
+**Last activity:** 2026-02-03 - Completed 02-09-PLAN.md (Deduplicator, session store, session coordinator tests)
 
 **Progress:**
 ```
 [Phase 1: Test Foundation ████████████████████████████████████] 100%
-[Phase 2: Characterization ████████████████████████░░░░░░░░░░] 73% (8/11 plans)
+[Phase 2: Characterization ██████████████████████████░░░░░░░░] 82% (9/11 plans)
 ```
 
 **Next Steps:**
@@ -43,12 +43,13 @@
 - Stability testing: Nightly 100-run workflow (01-03) + 50-run validation complete (01-04)
 - Test quality: Comprehensive audit complete (66 time.Sleep violations documented, 3 races addressed)
 - Coverage tracking: Per-package measurement with CI integration (02-05)
-- Coverage baseline: miner/ 32.4%, relayer/ 6.7%, cache/ 0.0%, total 17.0% (accurate with -tags test)
+- Coverage baseline: miner/ 32.4% → 37.6% (up 5.2pp), relayer/ 6.7%, cache/ 0.0%, total 17.0% (accurate with -tags test)
 - testutil package: Complete with 10/10 consecutive test runs passing, import cycle broken (02-06)
 - Lifecycle callback tests: 31 tests (23 state + 8 concurrent), 10/10 stability runs
 - Session lifecycle tests: 2103 lines covering state machine + concurrency
 - Relayer tests: 3343 lines across proxy_test.go, proxy_concurrent_test.go, relay_processor_test.go, relay_grpc_service_test.go
 - gRPC transport tests: 825 lines covering unary relay, error handling, metadata forwarding, concurrency (02-08)
+- Miner core tests: 36 tests (1162 lines) for deduplicator, session store, session coordinator (02-09)
 
 **Blockers:** None
 
@@ -146,9 +147,9 @@ None currently. External dependencies (WebSocket handshake spec, historical para
 
 ## Session Continuity
 
-**Last session:** 2026-02-03 12:32:22 UTC
+**Last session:** 2026-02-03 12:35:30 UTC
 
-**Stopped at:** Completed 02-08-PLAN.md (gRPC transport characterization tests)
+**Stopped at:** Completed 02-09-PLAN.md (Deduplicator, session store, session coordinator tests)
 
 **Resume file:** None
 
@@ -158,13 +159,14 @@ None currently. External dependencies (WebSocket handshake spec, historical para
 - **Test Quality Standards:** Use miniredis for Redis (not mocks), all tests pass `go test -race`, deterministic data only
 - **Performance Target:** 1000+ RPS per relayer replica must be maintained through refactoring
 - **Coverage Goal:** 80%+ enforcement on critical paths (miner/, relayer/, cache/)
-- **Coverage Baseline:** miner/ 32.4%, relayer/ 6.7%, cache/ 0.0%, total 17.0% (accurate with -tags test)
+- **Coverage Progress:** miner/ 32.4% → 37.6%, relayer/ 6.7%, cache/ 0.0%, total 17.0% (accurate with -tags test)
 - **testutil patterns:** RelayBuilder(seed).BuildN(n), embed RedisTestSuite, deterministic helpers (NO SessionBuilder - removed)
 - **Lifecycle callback test patterns:** Use local mocks with `lc*`/`conc*` prefixes due to import cycle
 - **Session lifecycle test patterns:** Use slc* prefix for package-local mocks
 - **Window calculation pattern:** Fixed session heights (100) for deterministic claim (102-106) and proof (106-110) windows
 - **Relayer test patterns:** Use local mock implementations, document actual behavior order
 - **gRPC test patterns:** Use real gRPC client/server (net.Listen), nil relayPipeline for most tests, manual stream creation
+- **Miner test patterns:** Use testutil.RedisTestSuite embedding, characterize actual behavior (don't prescribe), thread-safe concurrency patterns
 
 **Open Questions:**
 
