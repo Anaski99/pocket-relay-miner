@@ -32,8 +32,11 @@ type SupplierWorkerConfig struct {
 	// Core dependencies
 	Logger      logging.Logger
 	RedisClient *redistransport.Client
-	KeyManager  keys.KeyManager
-	Config      *Config
+	// RedisStreamClients are additional Redis clients for stream consumption (multi-source).
+	// When non-empty, miner consumes from primary + these; state stays on RedisClient.
+	RedisStreamClients []*redistransport.Client
+	KeyManager         keys.KeyManager
+	Config             *Config
 
 	// Blockchain connection config
 	QueryNodeRPCUrl  string
@@ -184,10 +187,12 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 
 	// Create Redis block client adapter to implement client.BlockClient interface
 	// Pass the RPC client so it can query specific block heights for proof generation
+	// Miner uses Subscribe() only (SessionLifecycleManager, BlockHealthMonitor) - disable BlockEvents() to avoid "channel full" warnings
 	w.redisBlockClientAdapter = cache.NewRedisBlockClientAdapter(
 		w.logger,
 		w.redisBlockSubscriber,
 		rpcClient, // For GetBlockAtHeight() - critical for proof generation
+		cache.RedisBlockClientAdapterConfig{EnableBlockEvents: false},
 	)
 	if err = w.redisBlockClientAdapter.Start(ctx); err != nil {
 		w.cleanup()
@@ -257,7 +262,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		w.logger,
 		w.queryClients.Proof(),
 		w.queryClients.Shared(),
-		w.queryClients.ServiceDifficulty(),
+		w.queryClients.Service(),
 	)
 
 	// Create tx client
@@ -317,6 +322,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		w.supplierRegistry,
 		SupplierManagerConfig{
 			RedisClient:           w.config.RedisClient,
+			RedisStreamClients:    w.config.RedisStreamClients,
 			ConsumerName:          w.config.Config.Redis.ConsumerName,
 			SessionTTL:            w.config.Config.GetSessionTTL(), // Uses CacheTTL if not explicitly set
 			CacheTTL:              w.config.Config.GetCacheTTL(),
@@ -397,7 +403,8 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 		snapshot, storeErr := state.SessionStore.Get(ctx, msg.Message.SessionId)
 		if storeErr == nil && snapshot != nil {
 			if snapshot.State.IsTerminal() {
-				w.logger.Info().
+				// Debug: expected in multi-source (EU+US) - cross-region latency causes late arrivals
+				w.logger.Debug().
 					Str("session_id", msg.Message.SessionId).
 					Str("supplier", supplierAddr).
 					Str("session_state", string(snapshot.State)).
@@ -418,7 +425,8 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	); err != nil {
 		// Check for permanent SMST errors (late relays, sealed/claimed sessions)
 		if IsPermanentSMSTError(err) {
-			w.logger.Info().
+			// Debug: same as LATE_RELAY - expected in multi-source when session sealed before relay arrived
+			w.logger.Debug().
 				Err(err).
 				Str("session_id", msg.Message.SessionId).
 				Str("supplier", supplierAddr).

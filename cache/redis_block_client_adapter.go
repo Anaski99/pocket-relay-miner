@@ -24,18 +24,26 @@ import (
 // 3. Provide BlockEvents() channel for components expecting it
 // 4. Query specific block heights via RPC (for proof generation)
 type RedisBlockClientAdapter struct {
-	logger          logging.Logger
-	redisSubscriber *RedisBlockSubscriber
-	cometClient     *http.HTTP // For querying specific block heights (proof generation)
-	lastBlock       atomic.Pointer[simpleBlock]
-	blockEventsCh   chan client.Block
-	ctx             context.Context
-	cancel          context.CancelFunc
-	wg              sync.WaitGroup
+	logger            logging.Logger
+	redisSubscriber   *RedisBlockSubscriber
+	cometClient       *http.HTTP // For querying specific block heights (proof generation)
+	lastBlock         atomic.Pointer[simpleBlock]
+	blockEventsCh     chan client.Block
+	enableBlockEvents bool // When false (miner), skip blockEventsCh to avoid "channel full" warnings
+	ctx               context.Context
+	cancel            context.CancelFunc
+	wg                sync.WaitGroup
 
 	// Fan-out subscribers for Subscribe() method
 	subscribersMu sync.RWMutex
 	subscribers   []chan *localclient.SimpleBlock
+}
+
+// RedisBlockClientAdapterConfig configures adapter behavior.
+type RedisBlockClientAdapterConfig struct {
+	// EnableBlockEvents forwards events to BlockEvents() channel when true.
+	// Miner uses Subscribe() only; set false to avoid filling an unused channel (~3h to fill at 6s/block).
+	EnableBlockEvents bool
 }
 
 // NewRedisBlockClientAdapter creates an adapter for relayer block client.
@@ -45,16 +53,23 @@ type RedisBlockClientAdapter struct {
 // - logger: Logger for the adapter
 // - redisSubscriber: RedisBlockSubscriber that receives events from Redis pub/sub
 // - cometClient: CometBFT RPC client for querying specific block heights (can be nil for relayers)
+// - config: Optional config. Pass RedisBlockClientAdapterConfig{EnableBlockEvents: false} for miner (uses Subscribe() only).
 func NewRedisBlockClientAdapter(
 	logger logging.Logger,
 	redisSubscriber *RedisBlockSubscriber,
 	cometClient *http.HTTP,
+	config ...RedisBlockClientAdapterConfig,
 ) *RedisBlockClientAdapter {
+	cfg := RedisBlockClientAdapterConfig{EnableBlockEvents: true} // default: relayer uses BlockEvents()
+	if len(config) > 0 {
+		cfg = config[0]
+	}
 	return &RedisBlockClientAdapter{
-		logger:          logging.ForComponent(logger, logging.ComponentRedisBlockClientAdapter),
-		redisSubscriber: redisSubscriber,
-		cometClient:     cometClient,
-		blockEventsCh:   make(chan client.Block, 2000),
+		logger:            logging.ForComponent(logger, logging.ComponentRedisBlockClientAdapter),
+		redisSubscriber:   redisSubscriber,
+		cometClient:       cometClient,
+		blockEventsCh:     make(chan client.Block, 2000),
+		enableBlockEvents: cfg.EnableBlockEvents,
 	}
 }
 
@@ -97,18 +112,19 @@ func (a *RedisBlockClientAdapter) Start(ctx context.Context) error {
 				}
 				a.lastBlock.Store(block)
 
-				// Forward to blockEventsCh for components using BlockEvents()
-				// Non-blocking send to prevent Redis event loop from blocking
-				select {
-				case a.blockEventsCh <- block:
-					// Event forwarded successfully
-				case <-a.ctx.Done():
-					return
-				default:
-					// Drop if full - component is slow
-					a.logger.Warn().
-						Int64("height", event.Height).
-						Msg("block events channel full, dropping event")
+				// Forward to blockEventsCh only when enabled (relayer uses BlockEvents(); miner uses Subscribe() only)
+				if a.enableBlockEvents {
+					select {
+					case a.blockEventsCh <- block:
+						// Event forwarded successfully
+					case <-a.ctx.Done():
+						return
+					default:
+						// Drop if full - component is slow
+						a.logger.Warn().
+							Int64("height", event.Height).
+							Msg("block events channel full, dropping event")
+					}
 				}
 
 				// Fan-out to Subscribe() subscribers

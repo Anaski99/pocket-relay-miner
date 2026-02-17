@@ -64,11 +64,11 @@ func NewStreamsConsumer(
 		return nil, fmt.Errorf("consumer name is required")
 	}
 
-	// Set defaults - VERY AGGRESSIVE for minimal latency
+	// Set defaults - balance throughput vs memory (300 suppliers × multi-source = many buffers)
 	// TRUE PUSH: BLOCK 0 returns instantly when data arrives, holds connection when empty
 	// Claims = money, we cannot afford to be slow consuming relays
 	if config.BatchSize <= 0 {
-		config.BatchSize = 5000 // Large batch for throughput
+		config.BatchSize = 2000 // Reduced from 5000 to save ~2GB with 300 suppliers
 	}
 	// ClaimIdleTimeout: How long before we claim messages from crashed consumers
 	if config.ClaimIdleTimeout <= 0 {
@@ -78,8 +78,8 @@ func NewStreamsConsumer(
 		config.MaxRetries = 3
 	}
 
-	// Channel buffer: 5000 messages to match batch size for smooth pipelining
-	channelBufferSize := int64(5000)
+	// Channel buffer: match batch size for smooth pipelining (reduced for memory)
+	channelBufferSize := config.BatchSize
 
 	// Single stream per supplier (simplified architecture)
 	streamName := transport.SupplierStreamName(config.StreamPrefix, config.SupplierOperatorAddress)

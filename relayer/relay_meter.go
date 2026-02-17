@@ -2,10 +2,12 @@ package relayer
 
 import (
 	"context"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"math"
 	"math/big"
+	"slices"
 	"sync"
 	"time"
 
@@ -54,6 +56,11 @@ const (
 	appStakeKeySuffix   = "app_stake"     // Cached app stakes
 	serviceKeySuffix    = "service"       // Cached service data
 	meterCleanupChannel = "meter:cleanup" // Pub/sub channel for cleanup signals
+
+	// Local cache eviction: fallback when miner is down (no cleanup signals)
+	localCacheEvictionInterval = 15 * time.Minute
+	localCacheMaxSize          = 100_000   // Max entries; evict oldest when exceeded
+	localCacheEvictTargetRatio = 0.8       // Evict down to 80% when over capacity
 )
 
 // RelayMeterConfig contains configuration for the relay meter.
@@ -217,6 +224,10 @@ func (m *RelayMeter) Start(ctx context.Context) error {
 	m.wg.Add(1)
 	go m.activeSessionsMetricTicker(m.ctx)
 
+	// Start local cache eviction ticker (fallback when miner is down - no cleanup signals)
+	m.wg.Add(1)
+	go m.localCacheEvictionTicker(m.ctx)
+
 	m.logger.Info().
 		Str("fail_behavior", string(m.config.FailBehavior)).
 		Dur("cache_ttl", m.config.CacheTTL).
@@ -364,6 +375,7 @@ func (m *RelayMeter) ClearSessionMeter(ctx context.Context, sessionID string) er
 	m.localCacheMu.Lock()
 	delete(m.localCache, sessionID)
 	m.localCacheMu.Unlock()
+	m.updateLocalCacheGauge()
 
 	// Delete from Redis (shared L2 cache)
 	keys := []string{
@@ -410,6 +422,8 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 	// Check Redis (L2)
 	meta, err := m.getSessionMeta(ctx, sessionID)
 	if err == nil && meta != nil {
+		// Evict if over capacity before adding
+		m.evictIfOverCapacity()
 		// Cache locally
 		m.localCacheMu.Lock()
 		m.localCache[sessionID] = meta
@@ -455,6 +469,8 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 	consumedKey := m.consumedKey(sessionID)
 	m.redisClient.Set(ctx, consumedKey, 0, m.config.CacheTTL)
 
+	// Evict if over capacity before adding
+	m.evictIfOverCapacity()
 	// Cache locally
 	m.localCacheMu.Lock()
 	m.localCache[sessionID] = meta
@@ -956,6 +972,100 @@ func (m *RelayMeter) countActiveSessions(ctx context.Context, pattern string) (i
 	}
 
 	return totalCount, bySupplierService, nil
+}
+
+// localCacheEvictionTicker periodically evicts expired and excess entries from localCache.
+// This is a fallback when the miner is down and no cleanup signals are published.
+func (m *RelayMeter) localCacheEvictionTicker(ctx context.Context) {
+	defer m.wg.Done()
+
+	ticker := time.NewTicker(localCacheEvictionInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			m.logger.Debug().Msg("local cache eviction ticker stopped")
+			return
+		case <-ticker.C:
+			evicted := m.evictExpiredLocalCacheEntries()
+			overEvicted := m.evictIfOverCapacity()
+			if evicted > 0 || overEvicted > 0 {
+				m.logger.Info().
+					Int("evicted_expired", evicted).
+					Int("evicted_over_capacity", overEvicted).
+					Msg("relay meter local cache eviction")
+			}
+			m.updateLocalCacheGauge()
+		}
+	}
+}
+
+// evictExpiredLocalCacheEntries removes entries older than CacheTTL.
+// Returns the number of entries evicted.
+func (m *RelayMeter) evictExpiredLocalCacheEntries() int {
+	cutoff := time.Now().Add(-m.config.CacheTTL).Unix()
+
+	m.localCacheMu.Lock()
+	defer m.localCacheMu.Unlock()
+
+	evicted := 0
+	for sid, meta := range m.localCache {
+		if meta.CreatedAt < cutoff {
+			delete(m.localCache, sid)
+			evicted++
+			relayMeterLocalCacheEvictions.WithLabelValues("ttl").Inc()
+		}
+	}
+	return evicted
+}
+
+// evictIfOverCapacity evicts oldest entries when over localCacheMaxSize.
+// Evicts down to localCacheEvictTargetRatio of max size.
+// Returns the number of entries evicted.
+func (m *RelayMeter) evictIfOverCapacity() int {
+	m.localCacheMu.Lock()
+	defer m.localCacheMu.Unlock()
+
+	if len(m.localCache) <= localCacheMaxSize {
+		return 0
+	}
+
+	// Collect entries sorted by CreatedAt (oldest first)
+	type entry struct {
+		sid  string
+		meta *SessionMeterMeta
+	}
+	entries := make([]entry, 0, len(m.localCache))
+	for sid, meta := range m.localCache {
+		entries = append(entries, entry{sid, meta})
+	}
+	// Sort by CreatedAt ascending (oldest first)
+	slices.SortFunc(entries, func(a, b entry) int {
+		return cmp.Compare(a.meta.CreatedAt, b.meta.CreatedAt)
+	})
+
+	targetSize := int(float64(localCacheMaxSize) * localCacheEvictTargetRatio)
+	toEvict := len(m.localCache) - targetSize
+	if toEvict <= 0 {
+		return 0
+	}
+
+	evicted := 0
+	for i := 0; i < toEvict && i < len(entries); i++ {
+		delete(m.localCache, entries[i].sid)
+		evicted++
+		relayMeterLocalCacheEvictions.WithLabelValues("capacity").Inc()
+	}
+	return evicted
+}
+
+// updateLocalCacheGauge updates the relay_meter_local_cache_entries metric.
+func (m *RelayMeter) updateLocalCacheGauge() {
+	m.localCacheMu.RLock()
+	n := len(m.localCache)
+	m.localCacheMu.RUnlock()
+	relayMeterLocalCacheEntries.Set(float64(n))
 }
 
 // Close gracefully shuts down the relay meter.

@@ -55,11 +55,11 @@ func NewSettlementMonitor(
 	}
 
 	// Create settlement processing subpool from master pool
-	// Configurable via worker_pools.settlement_workers (default: 2)
-	// Using a subpool ensures settlement processing doesn't lock claim/proof submission
+	// Configurable via worker_pools.settlement_workers (default: 1)
+	// BlockResults RPC returns 1GB+ on mainnet; 1 worker caps peak memory.
 	// Uses CreateBoundedSubpool to cap at parent pool max and warn if exceeded
 	if settlementWorkers <= 0 {
-		settlementWorkers = 2 // default
+		settlementWorkers = 1 // default: minimize BlockResults memory
 	}
 	componentLogger := logging.ForComponent(logger, "settlement_monitor")
 	settlementSubpool := CreateBoundedSubpool(componentLogger, masterPool, settlementWorkers, "settlement_subpool")

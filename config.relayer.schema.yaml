@@ -49,6 +49,11 @@ properties:
         description: Close idle connections after this many seconds (0 = use default 300s)
         default: 0
         minimum: 0
+      dial_timeout_seconds:
+        type: integer
+        description: Timeout for establishing new TCP connections. For cross-region Redis, use 10-15. 0 = go-redis default (5s)
+        default: 0
+        minimum: 0
       namespace:
         type: object
         description: Redis key namespace configuration (must match miner configuration)
@@ -366,10 +371,6 @@ properties:
         description: Async log buffer size
         default: 100000
         minimum: 1000
-      enable_caller:
-        type: boolean
-        description: Add caller file:line to log events. Useful for debugging but adds ~14% allocation overhead under high throughput. Disable in production.
-        default: false
 
   relay_meter:
     type: object

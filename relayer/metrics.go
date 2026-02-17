@@ -432,6 +432,25 @@ var (
 		[]string{"operation"},
 	)
 
+	relayMeterLocalCacheEntries = observability.RelayerFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relay_meter_local_cache_entries",
+			Help:      "Number of entries in relay meter local L1 cache (session meters)",
+		},
+	)
+
+	relayMeterLocalCacheEvictions = observability.RelayerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relay_meter_local_cache_evictions_total",
+			Help:      "Total relay meter local cache evictions (ttl=expired, capacity=over max size)",
+		},
+		[]string{"reason"},
+	)
+
 	// Unused - reserved for future relay meter parameter refresh tracking
 	// relayMeterParamsRefreshed = observability.RelayerFactory.NewCounterVec(
 	// 	prometheus.CounterOpts{

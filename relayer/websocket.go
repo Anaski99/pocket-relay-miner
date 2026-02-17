@@ -181,9 +181,8 @@ var WebSocketUpgrader = websocket.Upgrader{
 	WriteBufferSize: 4096,
 	// Accept connections from any origin for cross-origin support
 	CheckOrigin: func(r *http.Request) bool { return true },
-	// Disable per-message compression to save ~300KB of flate state per connection.
-	// Relay payloads are small protobuf messages where compression overhead exceeds savings.
-	EnableCompression: false,
+	// Enable per-message compression (RFC 7692 - permessage-deflate)
+	EnableCompression: true,
 }
 
 // NewWebSocketBridge creates a new WebSocket bridge.
@@ -221,7 +220,7 @@ func NewWebSocketBridge(
 		publisher:        publisher,
 		responseSigner:   responseSigner,
 		relayPipeline:    relayPipeline,
-		msgChan:          make(chan wsMessage, 100),
+		msgChan:          make(chan wsMessage, 2000),
 		serviceID:        serviceID,
 		supplierAddress:  supplierAddress,
 		arrivalHeight:    arrivalHeight,
@@ -247,10 +246,9 @@ func connectWebSocketBackend(backendURL string, headers http.Header, dialTimeout
 		return nil, err
 	}
 
-	// Create dialer with timeout from profile.
-	// Compression is disabled to save ~150KB of flate state per connection.
+	// Create dialer with compression and timeout from profile
 	dialer := &websocket.Dialer{
-		EnableCompression: false,
+		EnableCompression: true, // Enable per-message compression for backend connections
 		HandshakeTimeout:  dialTimeout,
 	}
 

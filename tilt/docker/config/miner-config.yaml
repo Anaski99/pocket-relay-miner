@@ -39,7 +39,7 @@ worker_pools:
   cpu_multiplier: 4             # CPU multiplier for baseline sizing
   workers_per_supplier: 2       # Workers per supplier (claim + proof parallel)
   query_workers: 20             # Fixed workers for blockchain queries
-  settlement_workers: 2         # Fixed workers for settlement events
+  settlement_workers: 1         # Fixed workers (BlockResults ~1GB on mainnet; 1 minimizes peak memory)
 
 leader_election:
   leader_ttl_seconds: 30

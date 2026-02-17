@@ -16,11 +16,19 @@ properties:
     properties:
       url:
         type: string
-        description: Redis connection URL
+        description: Primary Redis URL used for all state (SMST, session store, leader, caches) and for stream consumption when multi-source is disabled
         pattern: ^redis(s)?://
         examples:
           - redis://localhost:6379
           - redis://redis-node1:6379,redis-node2:6379
+      stream_source_urls:
+        type: array
+        description: Optional list of additional Redis URLs used only for stream consumption (multi-source miner). When set, the miner consumes from primary + these URLs and merges relays per supplier. Relayers are unchanged (each publishes to its local Redis). Miner must have good connectivity to all listed Redis instances.
+        items:
+          type: string
+          pattern: ^redis(s)?://
+        examples:
+          - ["redis://us-redis:6379", "redis://eu-redis:6379"]
       consumer_name:
         type: string
         description: Unique consumer name for this miner instance (auto-generated from hostname if not set)
@@ -47,6 +55,11 @@ properties:
       conn_max_idle_time_seconds:
         type: integer
         description: Close idle connections after this many seconds (0 = use default 300s)
+        default: 0
+        minimum: 0
+      dial_timeout_seconds:
+        type: integer
+        description: Timeout for establishing new TCP connections. For cross-region/Tailscale, use 10-15 to avoid "i/o timeout". 0 = go-redis default (5s)
         default: 0
         minimum: 0
       namespace:
@@ -236,10 +249,6 @@ properties:
         description: Async log buffer size
         default: 100000
         minimum: 1000
-      enable_caller:
-        type: boolean
-        description: Add caller file:line to log events. Useful for debugging but adds ~14% allocation overhead under high throughput. Disable in production.
-        default: false
 
   block_time_seconds:
     type: integer
@@ -339,8 +348,8 @@ properties:
         minimum: 1
       settlement_workers:
         type: integer
-        description: Fixed workers for settlement event processing
-        default: 2
+        description: Fixed workers for settlement event processing (BlockResults ~1GB on mainnet; 1 minimizes peak memory)
+        default: 1
         minimum: 1
 
   leader_election:

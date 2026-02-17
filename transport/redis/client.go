@@ -68,6 +68,11 @@ type ClientConfig struct {
 	// Set to 0 to disable (connections never closed due to idle time)
 	ConnMaxIdleTimeSeconds int
 
+	// DialTimeoutSeconds is the timeout for establishing new TCP connections.
+	// Default: 5 seconds (go-redis default). For cross-region/Tailscale, use 10-15s.
+	// Set to 0 to use go-redis default.
+	DialTimeoutSeconds int
+
 	// Namespace configures Redis key prefixes.
 	// If not provided, defaults are used (ha:cache, ha:events, etc.)
 	Namespace config.RedisNamespaceConfig
@@ -141,19 +146,22 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 		if cfg.ConnMaxIdleTimeSeconds > 0 {
 			opts.ConnMaxIdleTime = time.Duration(cfg.ConnMaxIdleTimeSeconds) * time.Second
 		}
+		if cfg.DialTimeoutSeconds > 0 {
+			opts.DialTimeout = time.Duration(cfg.DialTimeoutSeconds) * time.Second
+		}
 
 		client = redis.NewClient(opts)
 
 	case "redis-sentinel":
 		// Redis Sentinel
-		client, err = newSentinelClient(u, maxRetries, poolSize, cfg.MinIdleConns, cfg.PoolTimeoutSeconds, cfg.ConnMaxIdleTimeSeconds)
+		client, err = newSentinelClient(u, maxRetries, poolSize, cfg.MinIdleConns, cfg.PoolTimeoutSeconds, cfg.ConnMaxIdleTimeSeconds, cfg.DialTimeoutSeconds)
 		if err != nil {
 			return nil, err
 		}
 
 	case "redis-cluster":
 		// Redis Cluster
-		client, err = newClusterClient(u, maxRetries, poolSize, cfg.MinIdleConns, cfg.PoolTimeoutSeconds, cfg.ConnMaxIdleTimeSeconds)
+		client, err = newClusterClient(u, maxRetries, poolSize, cfg.MinIdleConns, cfg.PoolTimeoutSeconds, cfg.ConnMaxIdleTimeSeconds, cfg.DialTimeoutSeconds)
 		if err != nil {
 			return nil, err
 		}
@@ -187,7 +195,7 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 
 // newSentinelClient creates a Redis Sentinel client.
 // URL format: redis-sentinel://[:password@]host1:port1,host2:port2/master_name[?db=N]
-func newSentinelClient(u *url.URL, maxRetries, poolSize, minIdleConns, poolTimeoutSeconds, connMaxIdleTimeSeconds int) (redis.UniversalClient, error) {
+func newSentinelClient(u *url.URL, maxRetries, poolSize, minIdleConns, poolTimeoutSeconds, connMaxIdleTimeSeconds, dialTimeoutSeconds int) (redis.UniversalClient, error) {
 	// Parse master name from path
 	masterName := strings.TrimPrefix(u.Path, "/")
 	if masterName == "" {
@@ -233,13 +241,16 @@ func newSentinelClient(u *url.URL, maxRetries, poolSize, minIdleConns, poolTimeo
 	if connMaxIdleTimeSeconds > 0 {
 		opts.ConnMaxIdleTime = time.Duration(connMaxIdleTimeSeconds) * time.Second
 	}
+	if dialTimeoutSeconds > 0 {
+		opts.DialTimeout = time.Duration(dialTimeoutSeconds) * time.Second
+	}
 
 	return redis.NewFailoverClient(opts), nil
 }
 
 // newClusterClient creates a Redis Cluster client.
 // URL format: redis-cluster://[:password@]host1:port1,host2:port2[?db=N]
-func newClusterClient(u *url.URL, maxRetries, poolSize, minIdleConns, poolTimeoutSeconds, connMaxIdleTimeSeconds int) (redis.UniversalClient, error) {
+func newClusterClient(u *url.URL, maxRetries, poolSize, minIdleConns, poolTimeoutSeconds, connMaxIdleTimeSeconds, dialTimeoutSeconds int) (redis.UniversalClient, error) {
 	// Parse cluster addresses
 	addrs := strings.Split(u.Host, ",")
 	if len(addrs) == 0 {
@@ -266,6 +277,9 @@ func newClusterClient(u *url.URL, maxRetries, poolSize, minIdleConns, poolTimeou
 	}
 	if connMaxIdleTimeSeconds > 0 {
 		opts.ConnMaxIdleTime = time.Duration(connMaxIdleTimeSeconds) * time.Second
+	}
+	if dialTimeoutSeconds > 0 {
+		opts.DialTimeout = time.Duration(dialTimeoutSeconds) * time.Second
 	}
 
 	return redis.NewClusterClient(opts), nil

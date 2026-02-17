@@ -43,8 +43,8 @@ type SupplierState struct {
 	Services     []string
 	Status       SupplierStatus
 
-	// Redis stream consumer for this supplier
-	Consumer *redistransport.StreamsConsumer
+	// Redis stream consumer(s) for this supplier. One when single-source, multiple when multi-source.
+	Consumers []*redistransport.StreamsConsumer
 
 	// Session management
 	SessionStore       *RedisSessionStore
@@ -68,10 +68,49 @@ type SupplierState struct {
 	wg       sync.WaitGroup
 }
 
+// multiStreamDeleter calls DeleteStream on each consumer (for multi-source; each is a no-op today).
+type multiStreamDeleter struct {
+	consumers []*redistransport.StreamsConsumer
+}
+
+func newMultiStreamDeleter(consumers []*redistransport.StreamsConsumer) *multiStreamDeleter {
+	return &multiStreamDeleter{consumers: consumers}
+}
+
+func (d *multiStreamDeleter) DeleteStream(ctx context.Context, sessionID string) error {
+	for _, c := range d.consumers {
+		if err := c.DeleteStream(ctx, sessionID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// multiPendingRelayChecker sums GetPendingRelayCount across all consumers (for multi-source).
+type multiPendingRelayChecker struct {
+	consumers []*redistransport.StreamsConsumer
+}
+
+func (p *multiPendingRelayChecker) GetPendingRelayCount(ctx context.Context, sessionID string) (int64, error) {
+	var total int64
+	for _, c := range p.consumers {
+		n, err := c.GetPendingRelayCount(ctx, sessionID)
+		if err != nil {
+			return 0, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
 // SupplierManagerConfig contains configuration for the SupplierManager.
 type SupplierManagerConfig struct {
-	// Redis connection
+	// Redis connection (primary: state + first stream source)
 	RedisClient *redistransport.Client
+
+	// RedisStreamClients are additional Redis clients used only for stream consumption (multi-source).
+	// When non-empty, one consumer is created per client (primary + these).
+	RedisStreamClients []*redistransport.Client
 
 	// Stream configuration
 	StreamPrefix  string
@@ -518,11 +557,18 @@ func (m *SupplierManager) addSupplierWithHandoff(ctx context.Context, supplier s
 				Msg("validating session SMST during handoff")
 
 			if exists == 0 && session.RelayCount > 0 {
+				// Terminal states (proved, probabilistic_proved, claim_window_closed, etc.):
+				// SMST was intentionally deleted after settlement or failure - no warning needed.
+				if session.State.IsTerminal() {
+					continue
+				}
+				// Non-terminal states (active, claiming, claimed, proving): missing SMST is a real problem.
 				m.logger.Error().
 					Str("supplier", supplier).
 					Str("session_id", session.SessionID).
 					Int64("relay_count", session.RelayCount).
-					Msg("HANDOFF WARNING: SMST missing but relay count > 0")
+					Str("state", string(session.State)).
+					Msg("HANDOFF WARNING: SMST missing but relay count > 0 (data loss or inconsistency)")
 			}
 		}
 	}
@@ -639,25 +685,37 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		},
 	)
 
-	// Create consumer for this supplier (single stream per supplier, fast 100ms polling)
-	consumer, err := redistransport.NewStreamsConsumer(
-		m.logger,
-		m.config.RedisClient,
-		transport.ConsumerConfig{
-			StreamPrefix:            m.config.RedisClient.KB().StreamPrefix(), // Namespace-aware prefix (e.g., "ha:relays")
-			SupplierOperatorAddress: operatorAddr,
-			ConsumerGroup:           m.config.RedisClient.KB().ConsumerGroup(), // Namespace-aware group (e.g., "ha-miners")
-			ConsumerName:            m.config.ConsumerName,
-			BatchSize:               int64(m.config.BatchSize),                // Use config value (default: 1000)
-			ClaimIdleTimeout:        m.config.ClaimIdleTimeout.Milliseconds(), // From config (default: 60000ms)
-			MaxRetries:              3,
-			// Note: Uses BLOCK 0 (TRUE PUSH) for live consumption - hardcoded in consumer
-		},
-		0, // Discovery interval ignored with single stream architecture
-	)
-	if err != nil {
-		cancelFn()
-		return fmt.Errorf("failed to create consumer for %s: %w", operatorAddr, err)
+	// Build list of Redis clients for stream consumption: primary + optional stream sources (multi-source)
+	streamClients := []*redistransport.Client{m.config.RedisClient}
+	if len(m.config.RedisStreamClients) > 0 {
+		streamClients = append(streamClients, m.config.RedisStreamClients...)
+	}
+
+	consumerConfig := transport.ConsumerConfig{
+		StreamPrefix:            m.config.RedisClient.KB().StreamPrefix(),
+		SupplierOperatorAddress: operatorAddr,
+		ConsumerGroup:           m.config.RedisClient.KB().ConsumerGroup(),
+		ConsumerName:            m.config.ConsumerName,
+		BatchSize:               int64(m.config.BatchSize),
+		ClaimIdleTimeout:        m.config.ClaimIdleTimeout.Milliseconds(),
+		MaxRetries:              3,
+	}
+	consumers := make([]*redistransport.StreamsConsumer, 0, len(streamClients))
+	for i, client := range streamClients {
+		consumer, err := redistransport.NewStreamsConsumer(
+			m.logger,
+			client,
+			consumerConfig,
+			0,
+		)
+		if err != nil {
+			for _, c := range consumers {
+				_ = c.Close()
+			}
+			cancelFn()
+			return fmt.Errorf("failed to create consumer %d for %s: %w", i, operatorAddr, err)
+		}
+		consumers = append(consumers, consumer)
 	}
 
 	// Create SMST manager for building session trees (Redis-backed for HA)
@@ -717,8 +775,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		}
 
 		// Wire stream deleter for cleanup after session settlement
-		// This stops the consumer from reading stale messages and frees Redis memory
-		lifecycleCallback.SetStreamDeleter(consumer)
+		lifecycleCallback.SetStreamDeleter(newMultiStreamDeleter(consumers))
 
 		// Wire submission tracker for debugging claim/proof submissions
 		// Tracks tx hashes, success/failure, errors, and timing for post-mortem analysis
@@ -732,6 +789,12 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		// Create lifecycle manager for monitoring sessions and triggering claim/proof
 		lifecycleConfig := m.config.SessionLifecycleConfig
 		lifecycleConfig.SupplierAddress = operatorAddr // Override for this supplier
+		var pendingChecker PendingRelayChecker
+		if len(consumers) == 1 {
+			pendingChecker = consumers[0]
+		} else {
+			pendingChecker = &multiPendingRelayChecker{consumers: consumers}
+		}
 		lifecycleManager = NewSessionLifecycleManager(
 			m.logger,
 			sessionStore,
@@ -739,8 +802,8 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			m.config.BlockClient,
 			lifecycleCallback,
 			lifecycleConfig,
-			consumer,            // Pass consumer as PendingRelayChecker for late relay detection
-			m.config.WorkerPool, // Pass master worker pool for transition subpool
+			pendingChecker,
+			m.config.WorkerPool,
 		)
 
 		// Wire meter cleanup publisher for notifying relayers when sessions leave active state.
@@ -791,7 +854,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 	state := &SupplierState{
 		OperatorAddr:       operatorAddr,
 		Status:             SupplierStatusActive,
-		Consumer:           consumer,
+		Consumers:          consumers,
 		SessionStore:       sessionStore,
 		SessionCoordinator: sessionCoordinator,
 		SMSTManager:        smstManager,
@@ -893,64 +956,103 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 	return nil
 }
 
+// mergedMsg pairs a stream message with the consumer it came from (for correct ACK routing in multi-source).
+type mergedMsg struct {
+	msg     transport.StreamMessage
+	consumer *redistransport.StreamsConsumer
+}
+
 // consumeForSupplier runs the consume loop for a single supplier with immediate ACK.
-// Each message is ACK'd immediately after successful processing to prevent race conditions
-// with XAUTOCLAIM reclaiming messages that were already processed but not yet ACK'd.
+// Single source: reads from one consumer. Multi-source: merges N consumer channels and ACKs to the correct consumer.
 func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *SupplierState) {
 	defer state.wg.Done()
 
-	msgChan := state.Consumer.Consume(ctx)
+	if len(state.Consumers) == 1 {
+		m.consumeForSupplierSingle(ctx, state, state.Consumers[0])
+		return
+	}
+	m.consumeForSupplierMulti(ctx, state)
+}
 
+func (m *SupplierManager) consumeForSupplierSingle(ctx context.Context, state *SupplierState, consumer *redistransport.StreamsConsumer) {
+	msgChan := consumer.Consume(ctx)
 	for {
 		select {
 		case msg, ok := <-msgChan:
 			if !ok {
-				// Channel closed, exit
 				return
 			}
-
-			// Track relay consumed from Redis Stream (relayer → miner)
-			RecordRelayConsumedFromStream(state.OperatorAddr, msg.Message.ServiceId)
-
-			// When draining, we continue processing existing messages
-			// but log that we're in drain mode for visibility
-			if state.Status == SupplierStatusDraining {
-				m.logger.Debug().
-					Str(logging.FieldSupplier, state.OperatorAddr).
-					Msg("processing relay during drain")
-			}
-
-			// Process the relay (adds to SMST tree)
-			if m.onRelay != nil {
-				startTime := time.Now()
-				if err := m.onRelay(ctx, state.OperatorAddr, &msg); err != nil {
-					m.logger.Warn().
-						Err(err).
-						Str(logging.FieldSupplier, state.OperatorAddr).
-						Str("session_id", msg.Message.SessionId).
-						Msg("failed to process relay")
-					// Record processing latency even on failure
-					RecordRelayProcessingLatency(state.OperatorAddr, msg.Message.ServiceId, "error", time.Since(startTime).Seconds())
-					// Don't ACK on processing failure - let XAUTOCLAIM retry
-					continue
-				}
-				// Record processing latency on success
-				RecordRelayProcessingLatency(state.OperatorAddr, msg.Message.ServiceId, "success", time.Since(startTime).Seconds())
-			}
-
-			// ACK immediately after successful processing
-			// This prevents race conditions where XAUTOCLAIM reclaims already-processed messages
-			if err := state.Consumer.AckMessage(ctx, msg); err != nil {
-				m.logger.Warn().
-					Err(err).
-					Str(logging.FieldSupplier, state.OperatorAddr).
-					Str("message_id", msg.ID).
-					Msg("failed to acknowledge message")
-			}
-
+			m.processAndAck(ctx, state, msg, consumer)
 		case <-ctx.Done():
 			return
 		}
+	}
+}
+
+func (m *SupplierManager) consumeForSupplierMulti(ctx context.Context, state *SupplierState) {
+	const mergedChanBuf = 1000 // Reduced from 5000 to save memory (300 suppliers × multi-source)
+	mergedCh := make(chan mergedMsg, mergedChanBuf)
+	var closeWg sync.WaitGroup
+	for _, consumer := range state.Consumers {
+		consumer := consumer
+		closeWg.Add(1)
+		go func() {
+			defer closeWg.Done()
+			ch := consumer.Consume(ctx)
+			for {
+				select {
+				case msg, ok := <-ch:
+					if !ok {
+						return
+					}
+					select {
+					case mergedCh <- mergedMsg{msg: msg, consumer: consumer}:
+					case <-ctx.Done():
+						return
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+	go func() {
+		closeWg.Wait()
+		close(mergedCh)
+	}()
+
+	for mmsg := range mergedCh {
+		m.processAndAck(ctx, state, mmsg.msg, mmsg.consumer)
+	}
+}
+
+func (m *SupplierManager) processAndAck(ctx context.Context, state *SupplierState, msg transport.StreamMessage, consumer *redistransport.StreamsConsumer) {
+	RecordRelayConsumedFromStream(state.OperatorAddr, msg.Message.ServiceId)
+
+	if state.Status == SupplierStatusDraining {
+		m.logger.Debug().Str(logging.FieldSupplier, state.OperatorAddr).Msg("processing relay during drain")
+	}
+
+	if m.onRelay != nil {
+		startTime := time.Now()
+		if err := m.onRelay(ctx, state.OperatorAddr, &msg); err != nil {
+			m.logger.Warn().
+				Err(err).
+				Str(logging.FieldSupplier, state.OperatorAddr).
+				Str("session_id", msg.Message.SessionId).
+				Msg("failed to process relay")
+			RecordRelayProcessingLatency(state.OperatorAddr, msg.Message.ServiceId, "error", time.Since(startTime).Seconds())
+			return
+		}
+		RecordRelayProcessingLatency(state.OperatorAddr, msg.Message.ServiceId, "success", time.Since(startTime).Seconds())
+	}
+
+	if err := consumer.AckMessage(ctx, msg); err != nil {
+		m.logger.Warn().
+			Err(err).
+			Str(logging.FieldSupplier, state.OperatorAddr).
+			Str("message_id", msg.ID).
+			Msg("failed to acknowledge message")
 	}
 }
 
@@ -1020,8 +1122,10 @@ func (m *SupplierManager) removeSupplier(operatorAddr string) {
 		}
 	}
 
-	if err := state.Consumer.Close(); err != nil {
-		m.logger.Warn().Err(err).Str(logging.FieldSupplier, operatorAddr).Msg("error closing consumer")
+	for i, consumer := range state.Consumers {
+		if err := consumer.Close(); err != nil {
+			m.logger.Warn().Err(err).Str(logging.FieldSupplier, operatorAddr).Int("consumer_index", i).Msg("error closing consumer")
+		}
 	}
 	if err := state.SessionCoordinator.Close(); err != nil {
 		m.logger.Warn().Err(err).Str(logging.FieldSupplier, operatorAddr).Msg("error closing session coordinator")
@@ -1114,7 +1218,9 @@ func (m *SupplierManager) Close() error {
 			_ = state.SMSTManager.Close()
 		}
 
-		_ = state.Consumer.Close()
+		for _, consumer := range state.Consumers {
+			_ = consumer.Close()
+		}
 		_ = state.SessionCoordinator.Close()
 		_ = state.SessionStore.Close()
 	}
@@ -1193,30 +1299,30 @@ func (m *SupplierManager) trimAllSupplierStreams(ctx context.Context, maxAge tim
 	var mu sync.Mutex // Protect counters
 
 	for _, state := range suppliers {
-		// Skip if consumer is nil (shouldn't happen but defensive)
-		if state.Consumer == nil {
+		if len(state.Consumers) == 0 {
 			continue
 		}
-
-		// Submit trimming work to the group
-		supplier := state // capture for closure
-		group.SubmitErr(func() error {
-			trimmed, err := supplier.Consumer.TrimStream(ctx, maxAge)
-			if err != nil {
-				m.logger.Warn().
-					Err(err).
-					Str("supplier", supplier.OperatorAddr).
-					Msg("failed to trim stream")
-				return nil // Don't fail the group for individual stream errors
-			}
-			if trimmed > 0 {
-				mu.Lock()
-				totalTrimmed += trimmed
-				trimmedSuppliers++
-				mu.Unlock()
-			}
-			return nil
-		})
+		for _, consumer := range state.Consumers {
+			consumer := consumer
+			supplier := state
+			group.SubmitErr(func() error {
+				trimmed, err := consumer.TrimStream(ctx, maxAge)
+				if err != nil {
+					m.logger.Warn().
+						Err(err).
+						Str("supplier", supplier.OperatorAddr).
+						Msg("failed to trim stream")
+					return nil
+				}
+				if trimmed > 0 {
+					mu.Lock()
+					totalTrimmed += trimmed
+					trimmedSuppliers++
+					mu.Unlock()
+				}
+				return nil
+			})
+		}
 	}
 
 	// Wait for all trim operations to complete

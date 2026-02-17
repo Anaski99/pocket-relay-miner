@@ -28,6 +28,12 @@ type RedisConfig struct {
 	// Set to 0 to disable (connections never closed due to idle time)
 	ConnMaxIdleTimeSeconds int `yaml:"conn_max_idle_time_seconds,omitempty"`
 
+	// DialTimeoutSeconds is the timeout for establishing new TCP connections.
+	// Default: 5 seconds (go-redis default)
+	// For cross-region or Tailscale connections, increase to 10-15s to avoid "i/o timeout" errors.
+	// Set to 0 to use go-redis default (5s)
+	DialTimeoutSeconds int `yaml:"dial_timeout_seconds,omitempty"`
+
 	// Namespace configures Redis key prefixes for all data types.
 	// All components (miner, relayer, cache) read from this config to build keys.
 	// If not specified, defaults are used (ha:cache, ha:events, ha:relays, etc.)

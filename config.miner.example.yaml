@@ -14,6 +14,10 @@ redis:
   # [PRODUCTION] url: "redis://user:password@redis-host:6379/0"
   # [PRODUCTION] url: "redis-sentinel://sentinel1:26379,sentinel2:26379/mymaster?db=0"
 
+  # Optional: multi-source miner - additional Redis URLs used only for stream consumption.
+  # When set, one consumer per URL (primary + these); state remains on redis.url. Relayers unchanged.
+  # stream_source_urls: ["redis://us-redis:6379", "redis://eu-redis:6379"]
+
   # Consumer name (auto-generated from hostname if not set)
   consumer_name: ""
 
@@ -215,7 +219,7 @@ session_lifecycle:
 #   cpu_multiplier: 4             # CPU multiplier for baseline sizing
 #   workers_per_supplier: 2       # Workers per supplier (claim + proof parallel)
 #   query_workers: 20             # Fixed workers for blockchain queries
-#   settlement_workers: 2         # Fixed workers for settlement events
+#   settlement_workers: 1         # Fixed workers (BlockResults ~1GB on mainnet; 1 minimizes peak memory)
 
 # ==============================================================================
 # Leader Election Configuration (HA Deployments)
@@ -337,5 +341,4 @@ logging:
   output: "stdout"  # stdout, stderr, or file path
   async: true  # Enable async logging for better performance
   async_buffer_size: 100000  # Async log buffer size
-  enable_caller: false  # Add caller file:line to logs (~14% alloc overhead, disable in production)
-  # [PRODUCTION] level: "info", enable_caller: false
+  # [PRODUCTION] level: "info"

@@ -170,7 +170,7 @@ var (
 			Name:      "compute_units_claimed_total",
 			Help:      "Total compute units successfully claimed (claim tx accepted on-chain)",
 		},
-		[]string{"supplier", "service_id"},
+		[]string{"supplier", "service_id", "session_id"},
 	)
 
 	computeUnitsProvedTotal = observability.MinerFactory.NewCounterVec(
@@ -180,7 +180,7 @@ var (
 			Name:      "compute_units_proved_total",
 			Help:      "Total compute units successfully proved (proof tx accepted on-chain or proof not required)",
 		},
-		[]string{"supplier", "service_id"},
+		[]string{"supplier", "service_id", "session_id"},
 	)
 
 	computeUnitsLostTotal = observability.MinerFactory.NewCounterVec(
@@ -201,7 +201,7 @@ var (
 			Name:      "upokt_claimed_total",
 			Help:      "Total uPOKT successfully claimed (compute units * service rate)",
 		},
-		[]string{"supplier", "service_id"},
+		[]string{"supplier", "service_id", "session_id"},
 	)
 
 	upoktProvedTotal = observability.MinerFactory.NewCounterVec(
@@ -211,7 +211,7 @@ var (
 			Name:      "upokt_proved_total",
 			Help:      "Total uPOKT successfully proved (revenue that will be settled)",
 		},
-		[]string{"supplier", "service_id"},
+		[]string{"supplier", "service_id", "session_id"},
 	)
 
 	upoktLostTotal = observability.MinerFactory.NewCounterVec(
@@ -232,7 +232,7 @@ var (
 			Name:      "relays_claimed_total",
 			Help:      "Total relays successfully claimed",
 		},
-		[]string{"supplier", "service_id"},
+		[]string{"supplier", "service_id", "session_id"},
 	)
 
 	relaysProvedTotal = observability.MinerFactory.NewCounterVec(
@@ -242,7 +242,7 @@ var (
 			Name:      "relays_proved_total",
 			Help:      "Total relays successfully proved",
 		},
-		[]string{"supplier", "service_id"},
+		[]string{"supplier", "service_id", "session_id"},
 	)
 
 	relaysLostTotal = observability.MinerFactory.NewCounterVec(
@@ -1168,51 +1168,51 @@ func RecordProofTxError(supplier, serviceID string, relays, computeUnits int64) 
 
 // recordRevenueClaimed is the internal function that records all claim success metrics.
 // This tracks compute units, uPOKT revenue, and relay count when a claim is accepted.
-func recordRevenueClaimed(supplier, serviceID string, computeUnits uint64, relayCount int64) {
+func recordRevenueClaimed(supplier, serviceID, sessionID string, computeUnits uint64, relayCount int64) {
 	cu := float64(computeUnits)
 	relays := float64(relayCount)
 
 	// Compute Units view (in pPOKT from service config)
-	computeUnitsClaimedTotal.WithLabelValues(supplier, serviceID).Add(cu)
+	computeUnitsClaimedTotal.WithLabelValues(supplier, serviceID, sessionID).Add(cu)
 
 	// uPOKT view (convert pPOKT to uPOKT by dividing by 1e6)
-	upoktClaimedTotal.WithLabelValues(supplier, serviceID).Add(cu / 1e6)
+	upoktClaimedTotal.WithLabelValues(supplier, serviceID, sessionID).Add(cu / 1e6)
 
 	// Relays view
-	relaysClaimedTotal.WithLabelValues(supplier, serviceID).Add(relays)
+	relaysClaimedTotal.WithLabelValues(supplier, serviceID, sessionID).Add(relays)
 }
 
 // recordRevenueProved is the internal function that records all proof success metrics.
 // This tracks compute units, uPOKT revenue, and relay count when a proof is accepted.
-func recordRevenueProved(supplier, serviceID string, computeUnits uint64, relayCount int64) {
+func recordRevenueProved(supplier, serviceID, sessionID string, computeUnits uint64, relayCount int64) {
 	cu := float64(computeUnits)
 	relays := float64(relayCount)
 
 	// Compute Units view (in pPOKT from service config)
-	computeUnitsProvedTotal.WithLabelValues(supplier, serviceID).Add(cu)
+	computeUnitsProvedTotal.WithLabelValues(supplier, serviceID, sessionID).Add(cu)
 	computeUnitsSettledTotal.WithLabelValues(supplier, serviceID).Add(cu) // Legacy metric
 
 	// uPOKT view (convert pPOKT to uPOKT by dividing by 1e6)
-	upoktProvedTotal.WithLabelValues(supplier, serviceID).Add(cu / 1e6)
+	upoktProvedTotal.WithLabelValues(supplier, serviceID, sessionID).Add(cu / 1e6)
 
 	// Relays view
-	relaysProvedTotal.WithLabelValues(supplier, serviceID).Add(relays)
+	relaysProvedTotal.WithLabelValues(supplier, serviceID, sessionID).Add(relays)
 }
 
 // RecordRevenueClaimed records successful claim submission across all revenue views.
-func RecordRevenueClaimed(supplier, serviceID string, computeUnits uint64, relayCount int64) {
-	recordRevenueClaimed(supplier, serviceID, computeUnits, relayCount)
+func RecordRevenueClaimed(supplier, serviceID, sessionID string, computeUnits uint64, relayCount int64) {
+	recordRevenueClaimed(supplier, serviceID, sessionID, computeUnits, relayCount)
 }
 
 // RecordRevenueProved records successful proof submission across all revenue views.
-func RecordRevenueProved(supplier, serviceID string, computeUnits uint64, relayCount int64) {
-	recordRevenueProved(supplier, serviceID, computeUnits, relayCount)
+func RecordRevenueProved(supplier, serviceID, sessionID string, computeUnits uint64, relayCount int64) {
+	recordRevenueProved(supplier, serviceID, sessionID, computeUnits, relayCount)
 }
 
 // RecordRevenueProbabilisticProved records revenue from a probabilistically proved session.
 // Uses same metrics as explicit proof since both are successful outcomes.
-func RecordRevenueProbabilisticProved(supplier, serviceID string, computeUnits uint64, relayCount int64) {
-	recordRevenueProved(supplier, serviceID, computeUnits, relayCount)
+func RecordRevenueProbabilisticProved(supplier, serviceID, sessionID string, computeUnits uint64, relayCount int64) {
+	recordRevenueProved(supplier, serviceID, sessionID, computeUnits, relayCount)
 }
 
 // RecordClaimSubmitted increments the claims submitted counter.

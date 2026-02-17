@@ -25,6 +25,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/relayer"
 	"github.com/pokt-network/pocket-relay-miner/rings"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
+	servicetypes "github.com/pokt-network/poktroll/x/service/types"
 )
 
 const (
@@ -89,16 +90,16 @@ Example:
 	return cmd
 }
 
-// serviceDifficultyQueryAdapter adapts the query.ServiceDifficultyClient to the
+// serviceDifficultyQueryAdapter adapts the client.ServiceQueryClient to the
 // relayer.ServiceDifficultyQueryClient interface by extracting TargetHash.
-// It uses the height-aware difficulty query to get difficulty at the session start height,
-// ensuring consistency with on-chain proof validation.
 type serviceDifficultyQueryAdapter struct {
-	queryClient query.ServiceDifficultyClient
+	queryClient interface {
+		GetServiceRelayDifficulty(ctx context.Context, serviceID string) (servicetypes.RelayMiningDifficulty, error)
+	}
 }
 
-func (a *serviceDifficultyQueryAdapter) GetServiceRelayDifficulty(ctx context.Context, serviceID string, sessionStartHeight int64) ([]byte, error) {
-	difficulty, err := a.queryClient.GetServiceRelayDifficultyAtHeight(ctx, serviceID, sessionStartHeight)
+func (a *serviceDifficultyQueryAdapter) GetServiceRelayDifficulty(ctx context.Context, serviceID string) ([]byte, error) {
+	difficulty, err := a.queryClient.GetServiceRelayDifficulty(ctx, serviceID)
 	if err != nil {
 		return nil, err
 	}
@@ -176,6 +177,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		MinIdleConns:           config.Redis.MinIdleConns,
 		PoolTimeoutSeconds:     config.Redis.PoolTimeoutSeconds,
 		ConnMaxIdleTimeSeconds: config.Redis.ConnMaxIdleTimeSeconds,
+		DialTimeoutSeconds:     config.Redis.DialTimeoutSeconds,
 		Namespace:              config.Redis.Namespace,
 	})
 	if err != nil {
@@ -184,27 +186,8 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	defer func() { _ = redisClient.Close() }()
 	logger.Info().Str("redis_url", redisURL).Msg("connected to Redis")
 
-	// Create supplier cache for checking supplier staking state
-	supplierCache := cache.NewSupplierCache(
-		logger,
-		redisClient,
-		cache.SupplierCacheConfig{
-			KeyPrefix: "ha:supplier",
-			FailOpen:  true, // Prioritize serving traffic over strict validation
-		},
-	)
-	// Start supplier cache for pub/sub subscription
-	if err := supplierCache.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start supplier cache: %w", err)
-	}
-	defer func() { _ = supplierCache.Close() }()
-	logger.Info().Msg("supplier cache initialized and started")
-
-	// Warmup supplier cache from Redis (load existing suppliers into L1 cache)
-	// This prevents relying solely on pub/sub, which can miss messages if relayer starts after miner
-	if err := supplierCache.WarmupFromRedis(ctx, nil); err != nil {
-		return fmt.Errorf("failed to warmup supplier cache: %w", err)
-	}
+	// Keys-only: supplier validation uses keys file (no Redis supplier cache).
+	// Validator enforces session + ring signature (authoritative on-chain check).
 
 	// Create query clients for fetching on-chain data (service compute units, etc.)
 	// Determine TLS setting - use config.PocketNode.GRPCInsecure to match miner behavior
@@ -476,6 +459,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 	// Load keys and create response signer
 	// Support multiple key sources: keys_file, keys_dir, keyring
+	var responseSigner *relayer.ResponseSigner
 	var keyProviders []keys.KeyProvider
 
 	// Try keys_file first (preferred for HA setup - same as miner)
@@ -538,7 +522,8 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		if len(loadedKeys) == 0 {
 			logger.Warn().Msg("no keys found - response signing will be disabled")
 		} else {
-			responseSigner, signerErr := relayer.NewResponseSigner(logger, loadedKeys)
+			var signerErr error
+			responseSigner, signerErr = relayer.NewResponseSigner(logger, loadedKeys)
 			if signerErr != nil {
 				return fmt.Errorf("failed to create response signer: %w", signerErr)
 			}
@@ -633,9 +618,36 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 				ringClient, // Enable relay request signature verification
 			)
 			// Wire up the difficulty provider using on-chain service difficulty data
-			difficultyProviderAdapter := &serviceDifficultyQueryAdapter{queryClient: queryClients.ServiceDifficulty()}
-			difficultyProvider := relayer.NewQueryDifficultyProvider(logger, difficultyProviderAdapter)
+			difficultyProviderAdapter := &serviceDifficultyQueryAdapter{queryClient: queryClients.Service()}
+			difficultyProvider := relayer.NewCachedDifficultyProvider(logger, difficultyProviderAdapter)
 			relayProcessor.SetDifficultyProvider(difficultyProvider)
+
+			// Subscribe to block events to invalidate difficulty cache on every block
+			// This ensures we always use current difficulty (even though blockchain has bug #1789)
+			// Buffer size: 2000 blocks (matches other block subscribers; prevents lag under load)
+			blockEventCh := blockSubscriber.Subscribe(ctx, 2000)
+			go func() {
+				difficultyLogger := logger.With().Str("component", "difficulty_invalidator").Logger()
+				for {
+					select {
+					case <-ctx.Done():
+						difficultyLogger.Debug().Msg("difficulty cache invalidator stopped")
+						return
+					case event, ok := <-blockEventCh:
+						if !ok {
+							difficultyLogger.Warn().Msg("block event channel closed")
+							return
+						}
+						// Invalidate ALL difficulty caches on every block
+						// Difficulty can change any block (when claims settle in EndBlocker)
+						difficultyProvider.InvalidateAllCache()
+						difficultyLogger.Debug().
+							Int64("height", event.Height()).
+							Msg("invalidated difficulty cache on new block")
+					}
+				}
+			}()
+			logger.Info().Msg("difficulty cache invalidator started (invalidates on every block)")
 
 			// Wire up the service compute units provider using on-chain service data
 			computeUnitsProvider := relayer.NewCachedServiceComputeUnitsProvider(logger, queryClients.Service())
@@ -712,9 +724,6 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	// Set supplier cache for checking supplier state before accepting relays
-	proxy.SetSupplierCache(supplierCache)
-
 	// Register backends for health checking (per RPC type)
 	for serviceID, svc := range config.Services {
 		for rpcType, backend := range svc.Backends {
@@ -727,7 +736,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 	// Start health/readiness server
 	if config.HealthCheck.Enabled {
-		healthServer := startHealthServer(ctx, logger, config.HealthCheck.Addr, supplierCache)
+		healthServer := startHealthServer(ctx, logger, config.HealthCheck.Addr, responseSigner)
 		defer func() { _ = healthServer.Close() }()
 		logger.Info().Str("addr", config.HealthCheck.Addr).Msg("health/readiness server started")
 	}
@@ -767,7 +776,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 }
 
 // startHealthServer starts a simple HTTP server for health and readiness checks.
-func startHealthServer(ctx context.Context, logger logging.Logger, addr string, supplierCache *cache.SupplierCache) *http.Server {
+func startHealthServer(ctx context.Context, logger logging.Logger, addr string, responseSigner *relayer.ResponseSigner) *http.Server {
 	mux := http.NewServeMux()
 
 	// /health - liveness probe (always returns OK if server is running)
@@ -776,17 +785,12 @@ func startHealthServer(ctx context.Context, logger logging.Logger, addr string, 
 		_, _ = w.Write([]byte("OK"))
 	})
 
-	// /ready - readiness probe (checks if supplier cache has data)
+	// /ready - readiness probe (keys-only: checks if we have signing keys)
 	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
-		// Check if supplier cache has loaded any suppliers
-		// This indicates the relayer has connected to Redis and miner has published supplier data
-		if supplierCache == nil {
-			http.Error(w, "supplier cache not initialized", http.StatusServiceUnavailable)
+		if responseSigner == nil || len(responseSigner.GetOperatorAddresses()) == 0 {
+			http.Error(w, "no signing keys loaded", http.StatusServiceUnavailable)
 			return
 		}
-
-		// For now, always return ready after cache is initialized
-		// TODO: Could check if cache has any suppliers loaded
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("READY"))
 	})

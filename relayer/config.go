@@ -226,6 +226,11 @@ type RedisConfig struct {
 	// Set to 0 to disable (connections never closed due to idle time)
 	ConnMaxIdleTimeSeconds int `yaml:"conn_max_idle_time_seconds,omitempty"`
 
+	// DialTimeoutSeconds is the timeout for establishing new TCP connections.
+	// Default: 5 seconds (go-redis default). For cross-region Redis, use 10-15s.
+	// Set to 0 to use go-redis default.
+	DialTimeoutSeconds int `yaml:"dial_timeout_seconds,omitempty"`
+
 	// Namespace configures Redis key prefixes for all data types.
 	// All components (miner, relayer, cache) read from this config to build keys.
 	// Must match miner configuration for proper operation.
@@ -531,6 +536,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Redis.ConnMaxIdleTimeSeconds < 0 {
 		return fmt.Errorf("redis.conn_max_idle_time_seconds must be >= 0 (0 = use default)")
+	}
+	if c.Redis.DialTimeoutSeconds < 0 {
+		return fmt.Errorf("redis.dial_timeout_seconds must be >= 0 (0 = use default)")
 	}
 
 	if c.PocketNode.QueryNodeRPCUrl == "" {

@@ -151,6 +151,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		MinIdleConns:           config.Redis.MinIdleConns,
 		PoolTimeoutSeconds:     config.Redis.PoolTimeoutSeconds,
 		ConnMaxIdleTimeSeconds: config.Redis.ConnMaxIdleTimeSeconds,
+		DialTimeoutSeconds:     config.Redis.DialTimeoutSeconds,
 		Namespace:              config.Redis.Namespace,
 	})
 	if err != nil {
@@ -165,6 +166,33 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		Str("redis_url", config.Redis.URL).
 		Str("consumer_name", config.Redis.ConsumerName).
 		Msg("connected to Redis")
+
+	// Create additional Redis clients for multi-source stream consumption when configured
+	var redisStreamClients []*redistransport.Client
+	if len(config.Redis.StreamSourceURLs) > 0 {
+		for i, streamURL := range config.Redis.StreamSourceURLs {
+			streamClient, err := redistransport.NewClient(ctx, redistransport.ClientConfig{
+				URL:                    streamURL,
+				PoolSize:               config.Redis.PoolSize,
+				MinIdleConns:           config.Redis.MinIdleConns,
+				PoolTimeoutSeconds:     config.Redis.PoolTimeoutSeconds,
+				ConnMaxIdleTimeSeconds: config.Redis.ConnMaxIdleTimeSeconds,
+				DialTimeoutSeconds:     config.Redis.DialTimeoutSeconds,
+				Namespace:              config.Redis.Namespace,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to create Redis stream source client %d: %w", i, err)
+			}
+			idx := i
+			defer func() {
+				if closeErr := streamClient.Close(); closeErr != nil {
+					logger.Error().Err(closeErr).Int("stream_source_index", idx).Msg("failed to close Redis stream source client")
+				}
+			}()
+			redisStreamClients = append(redisStreamClients, streamClient)
+			logger.Info().Str("redis_url", streamURL).Int("index", i).Msg("connected to Redis stream source")
+		}
+	}
 
 	// Create key providers from config
 	providers, err := createKeyProviders(logger, config)
@@ -243,14 +271,15 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	// If there's only 1 miner, it claims all suppliers.
 	// If there are multiple miners, they automatically distribute suppliers via Redis leases.
 	supplierWorker := miner.NewSupplierWorker(miner.SupplierWorkerConfig{
-		Logger:           logger,
-		RedisClient:      redisClient,
-		KeyManager:       keyManager,
-		Config:           config,
-		QueryNodeRPCUrl:  config.PocketNode.QueryNodeRPCUrl,
-		QueryNodeGRPCUrl: config.PocketNode.QueryNodeGRPCUrl,
-		GRPCInsecure:     config.PocketNode.GRPCInsecure,
-		ChainID:          config.GetChainID(), // Get from config (defaults to "pocket" if not set)
+		Logger:             logger,
+		RedisClient:        redisClient,
+		RedisStreamClients: redisStreamClients,
+		KeyManager:         keyManager,
+		Config:             config,
+		QueryNodeRPCUrl:    config.PocketNode.QueryNodeRPCUrl,
+		QueryNodeGRPCUrl:   config.PocketNode.QueryNodeGRPCUrl,
+		GRPCInsecure:       config.PocketNode.GRPCInsecure,
+		ChainID:            config.GetChainID(), // Get from config (defaults to "pocket" if not set)
 	})
 
 	if err = supplierWorker.Start(ctx); err != nil {

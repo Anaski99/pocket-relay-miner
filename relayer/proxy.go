@@ -24,7 +24,6 @@ import (
 	"golang.org/x/net/http2/h2c"
 	"google.golang.org/grpc"
 
-	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/transport"
 	servicetypes "github.com/pokt-network/poktroll/x/service/types"
@@ -71,12 +70,9 @@ const (
 	rejectReasonMissingServiceID            = "missing_service_id"
 	rejectReasonNilRelayRequest             = "nil_relay_request"
 	rejectReasonResponseSignerNotConfigured = "response_signer_not_configured"
-	rejectReasonSupplierCacheNotConfigured  = "supplier_cache_not_configured"
-	rejectReasonUnknownService              = "unknown_service"
-	rejectReasonMissingSupplierAddress      = "missing_supplier_address"
-	rejectReasonSupplierCacheError          = "supplier_cache_error"
-	rejectReasonSupplierNotFound            = "supplier_not_found"
-	rejectReasonSupplierInactive            = "supplier_inactive"
+	rejectReasonUnknownService         = "unknown_service"
+	rejectReasonMissingSupplierAddress = "missing_supplier_address"
+	rejectReasonSupplierNotFound       = "supplier_not_found"
 	rejectReasonNoServices                  = "no_services"
 	rejectReasonWrongService                = "wrong_service"
 	rejectReasonBackendUnhealthy            = "backend_unhealthy"
@@ -95,24 +91,11 @@ const (
 	dropReasonStakeExhausted   = "stake_exhausted"
 )
 
-// gzipMinCompressSize is the minimum response size worth compressing.
-// Below this threshold, gzip overhead (header/trailer/dictionary) makes the
-// output larger than the input. Typical signed relay responses for simple
-// JSON-RPC calls (eth_blockNumber, etc.) are 500-800 bytes.
-const gzipMinCompressSize = 1024
-
 // gzipWriterPool is a pool of gzip.Writer instances to reduce allocations
 // in the hot path when compressing relay responses.
 var gzipWriterPool = sync.Pool{
 	New: func() interface{} {
 		return gzip.NewWriter(nil)
-	},
-}
-
-// gzipBufPool is a pool of bytes.Buffer instances for gzip compression output.
-var gzipBufPool = sync.Pool{
-	New: func() interface{} {
-		return new(bytes.Buffer)
 	},
 }
 
@@ -136,7 +119,6 @@ type ProxyServer struct {
 	validator      RelayValidator
 	relayProcessor RelayProcessor
 	responseSigner *ResponseSigner
-	supplierCache  *cache.SupplierCache
 	relayMeter     *RelayMeter
 
 	// HTTP client pool for backend requests (one client per timeout profile)
@@ -627,15 +609,6 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if p.supplierCache == nil {
-		logging.WithSessionContext(p.logger.Error(), sessionCtx).
-			Msg("supplier cache not configured")
-		p.sendError(w, http.StatusInternalServerError, "relayer not properly configured")
-		relaysReceived.WithLabelValues(serviceID, "unknown").Inc()
-		relaysRejected.WithLabelValues(serviceID, metricLabelUnknown, rejectReasonSupplierCacheNotConfigured).Inc()
-		return
-	}
-
 	// Check if service exists
 	svcConfig, ok := p.config.Services[serviceID]
 	if !ok {
@@ -681,48 +654,17 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check supplier state against our registry
-	supplierState, cacheErr := p.supplierCache.GetSupplierState(r.Context(), supplierOperatorAddr)
-	if cacheErr != nil {
+	// Keys-only: validate supplier against our keys (same source as miner).
+	// Validator enforces session + ring signature (authoritative on-chain check).
+	if !p.responseSigner.HasSigner(supplierOperatorAddr) {
 		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
-			Err(cacheErr).
-			Msg("failed to check supplier state in cache")
-		p.sendError(w, http.StatusServiceUnavailable, "failed to verify supplier state")
-		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonSupplierCacheError).Inc()
-		return
-	}
-	if supplierState == nil {
-		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
-			Msg("supplier not found in cache")
-		p.sendError(w, http.StatusServiceUnavailable, fmt.Sprintf("supplier %s not registered with any miner", supplierOperatorAddr))
+			Msg("supplier not in keys")
+		p.sendError(w, http.StatusServiceUnavailable, fmt.Sprintf("supplier %s not in relayer keys", supplierOperatorAddr))
 		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonSupplierNotFound).Inc()
 		return
 	}
-	if !supplierState.IsActive() {
-		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
-			Str("status", supplierState.Status).
-			Msg("supplier not active")
-		p.sendError(w, http.StatusServiceUnavailable, fmt.Sprintf("supplier %s is %s", supplierOperatorAddr, supplierState.Status))
-		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonSupplierInactive).Inc()
-		return
-	}
-	if len(supplierState.Services) == 0 {
-		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
-			Msg("supplier has no services registered")
-		p.sendError(w, http.StatusServiceUnavailable, fmt.Sprintf("supplier %s has no services registered", supplierOperatorAddr))
-		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonNoServices).Inc()
-		return
-	}
-	if !supplierState.IsActiveForService(serviceID) {
-		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
-			Int("num_services", len(supplierState.Services)).
-			Msg("supplier not staked for service")
-		p.sendError(w, http.StatusServiceUnavailable, fmt.Sprintf("supplier %s not staked for service %s", supplierOperatorAddr, serviceID))
-		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonWrongService).Inc()
-		return
-	}
 	logging.WithSessionContext(p.logger.Debug(), sessionCtx).
-		Msg("supplier is active for service")
+		Msg("supplier validated via keys")
 
 	// Check backend health
 	if !p.healthChecker.IsHealthy(serviceID) {
@@ -885,10 +827,9 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", responseContentType)
 
-		// RFC compliance: Compress response if client accepts gzip and payload is large enough.
-		// Skip compression for small payloads where gzip overhead makes the output larger.
+		// RFC compliance: Compress response if client accepts gzip
 		responseData := signedResponseBz
-		if clientAcceptsGzip(r) && len(signedResponseBz) >= gzipMinCompressSize {
+		if clientAcceptsGzip(r) {
 			compressed, compressErr := compressGzip(signedResponseBz)
 			if compressErr != nil {
 				logging.WithSessionContext(p.logger.Warn(), sessionCtx).
@@ -1575,12 +1516,6 @@ func (p *ProxyServer) SetResponseSigner(signer *ResponseSigner) {
 	p.responseSigner = signer
 }
 
-// SetSupplierCache sets the supplier cache for checking supplier state.
-// This allows the relayer to check if suppliers are active before processing relays.
-func (p *ProxyServer) SetSupplierCache(cache *cache.SupplierCache) {
-	p.supplierCache = cache
-}
-
 // SetRelayMeter sets the relay meter for rate limiting based on app stakes.
 func (p *ProxyServer) SetRelayMeter(meter *RelayMeter) {
 	p.relayMeter = meter
@@ -1833,14 +1768,11 @@ func (p *ProxyServer) Close() error {
 
 // compressGzip compresses data using gzip compression.
 // Returns the compressed data or an error if compression fails.
-// Uses sync.Pool for both gzip.Writer and bytes.Buffer to reduce allocations.
+// Uses sync.Pool to reuse gzip.Writer instances and reduce allocations.
 func compressGzip(data []byte) ([]byte, error) {
-	buf := gzipBufPool.Get().(*bytes.Buffer)
-	buf.Reset()
-	defer gzipBufPool.Put(buf)
-
+	var buf bytes.Buffer
 	writer := gzipWriterPool.Get().(*gzip.Writer)
-	writer.Reset(buf)
+	writer.Reset(&buf)
 	defer gzipWriterPool.Put(writer)
 
 	if _, err := writer.Write(data); err != nil {
@@ -1849,11 +1781,7 @@ func compressGzip(data []byte) ([]byte, error) {
 	if err := writer.Close(); err != nil {
 		return nil, fmt.Errorf("failed to close gzip writer: %w", err)
 	}
-
-	// Copy to a new slice — the pooled buffer will be reused.
-	result := make([]byte, buf.Len())
-	copy(result, buf.Bytes())
-	return result, nil
+	return buf.Bytes(), nil
 }
 
 // clientAcceptsGzip checks if the client accepts gzip encoding

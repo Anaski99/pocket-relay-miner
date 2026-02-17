@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/alitto/pond/v2"
@@ -195,8 +196,9 @@ type WorkerPoolConfigYAML struct {
 	QueryWorkers int `yaml:"query_workers,omitempty"`
 
 	// SettlementWorkers is the fixed number of workers for settlement event processing.
-	// block_results can be 1GB+ on mainnet, needs dedicated workers.
-	// Default: 2
+	// BlockResults RPC returns full FinalizeBlockEvents (1GB+ on mainnet); each worker
+	// holds one in-flight response. Use 1 to minimize peak memory (~1GB vs ~2GB with 2).
+	// Default: 1
 	SettlementWorkers int `yaml:"settlement_workers,omitempty"`
 }
 
@@ -208,6 +210,12 @@ type RedisConfig struct {
 	// Typically derived from the hostname / pod name.
 	// If not set, auto-generated from the hostname.
 	ConsumerName string `yaml:"consumer_name,omitempty"`
+
+	// StreamSourceURLs is an optional list of additional Redis URLs used only for stream consumption.
+	// When non-empty, the miner creates one stream consumer per URL (primary redis.url plus these).
+	// Use for multi-region: e.g. primary = EU Redis (state + EU stream), stream_source_urls = [US Redis URL].
+	// Same namespace/consumer group on all; each Redis has its own stream ha:relays:{supplier}.
+	StreamSourceURLs []string `yaml:"stream_source_urls,omitempty"`
 
 	// Note: Stream consumption uses BLOCK 0 (TRUE PUSH) for live consumption.
 	// This is not configurable - messages are delivered instantly when available.
@@ -274,6 +282,22 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid redis.url: %w", err)
 	}
 
+	// Validate stream_source_urls when set (multi-source consumer)
+	seen := make(map[string]bool)
+	seen[c.Redis.URL] = true
+	for i, u := range c.Redis.StreamSourceURLs {
+		if u == "" {
+			return fmt.Errorf("redis.stream_source_urls[%d] must be non-empty", i)
+		}
+		if _, err := url.Parse(u); err != nil {
+			return fmt.Errorf("invalid redis.stream_source_urls[%d]: %w", i, err)
+		}
+		if seen[u] {
+			return fmt.Errorf("redis.stream_source_urls: duplicate or same as redis.url: %s", u)
+		}
+		seen[u] = true
+	}
+
 	// ConsumerName is optional - auto-generated if not set
 	// ConsumerGroup is derived from namespace config
 
@@ -289,6 +313,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Redis.ConnMaxIdleTimeSeconds < 0 {
 		return fmt.Errorf("redis.conn_max_idle_time_seconds must be >= 0 (0 = use default)")
+	}
+	if c.Redis.DialTimeoutSeconds < 0 {
+		return fmt.Errorf("redis.dial_timeout_seconds must be >= 0 (0 = use default)")
 	}
 
 	if c.PocketNode.QueryNodeRPCUrl == "" {
@@ -603,12 +630,12 @@ func (c *Config) GetQueryWorkers() int {
 }
 
 // GetSettlementWorkers returns the fixed number of settlement workers.
-// Default: 2
+// Default: 1 (BlockResults is ~1GB+ on mainnet; 1 worker caps peak memory)
 func (c *Config) GetSettlementWorkers() int {
 	if c.WorkerPools.SettlementWorkers > 0 {
 		return c.WorkerPools.SettlementWorkers
 	}
-	return 2 // Default
+	return 1 // Default: minimizes peak memory from BlockResults JSON
 }
 
 // GetChainID returns the chain ID for transaction signing.
@@ -677,6 +704,18 @@ func LoadConfig(path string) (*Config, error) {
 
 	if err = yaml.Unmarshal(data, cf); err != nil {
 		return nil, fmt.Errorf("failed to parse cf file: %w", err)
+	}
+
+	// Optional: override stream_source_urls from env (comma-separated) for multi-source deployment
+	if envURLs := os.Getenv("MINER_REDIS_STREAM_SOURCE_URLS"); envURLs != "" {
+		var urls []string
+		for _, s := range strings.Split(envURLs, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				urls = append(urls, s)
+			}
+		}
+		cf.Redis.StreamSourceURLs = urls
 	}
 
 	// Generate consumer name from hostname if not set

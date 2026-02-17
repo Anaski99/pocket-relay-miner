@@ -866,7 +866,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				for i, snapshot := range validSnapshots {
 					RecordClaimSubmitted(snapshot.SupplierOperatorAddress, snapshot.ServiceID)
 					RecordClaimSubmissionLatency(snapshot.SupplierOperatorAddress, blocksAfterWindowOpen)
-					RecordRevenueClaimed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
+					RecordRevenueClaimed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.SessionID, snapshot.TotalComputeUnits, snapshot.RelayCount)
 
 					// Copy root hash to result (maintain order)
 					allRootHashes[sessionIndex] = groupRootHashes[i]
@@ -1116,7 +1116,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					logger.Info().
 						Str(logging.FieldSessionID, snapshot.SessionID).
 						Msg("proof NOT required for this claim - marking as probabilistically proved")
-					RecordRevenueProbabilisticProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
+					RecordRevenueProbabilisticProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.SessionID, snapshot.TotalComputeUnits, snapshot.RelayCount)
 
 					// CRITICAL: Transition session state to probabilistic_proved
 					if lc.sessionCoordinator != nil {
@@ -1246,7 +1246,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 						Str(logging.FieldSessionID, snapshot.SessionID).
 						Msg("proof not required (blockchain settled claim without proof)")
 
-					RecordRevenueProbabilisticProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
+					RecordRevenueProbabilisticProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.SessionID, snapshot.TotalComputeUnits, snapshot.RelayCount)
 
 					if lc.sessionCoordinator != nil {
 						if err := lc.sessionCoordinator.OnProbabilisticProved(ctx, snapshot.SessionID); err != nil {
@@ -1509,7 +1509,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				for _, snapshot := range sessionsNeedingProof {
 					RecordProofSubmitted(snapshot.SupplierOperatorAddress, snapshot.ServiceID)
 					RecordProofSubmissionLatency(snapshot.SupplierOperatorAddress, blocksAfterWindowOpen)
-					RecordRevenueProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
+					RecordRevenueProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.SessionID, snapshot.TotalComputeUnits, snapshot.RelayCount)
 				}
 
 				// Track proof submissions to Redis for debugging
